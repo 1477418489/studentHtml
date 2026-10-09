@@ -67,7 +67,7 @@ async function authorize(request, env) {
   const parsed = await readRequestBody(request);
   if (parsed.response) return parsed;
   const { body } = parsed;
-  if (typeof body.password !== "string" || body.password.length > 512) {
+  if (typeof body.password !== "string") {
     return { response: json({ error: "invalid_password" }, 401) };
   }
 
@@ -111,7 +111,6 @@ async function handleSetup(request, env) {
     return json({ error: "invalid_setup_token" }, 401);
   }
   if (typeof password !== "string" || password.length === 0) return json({ error: "invalid_password" }, 400);
-  if (password.length > 512) return json({ error: "password_too_long" }, 400);
 
   if (await readAuthRecord(env.DB)) return json({ error: "already_initialized" }, 409);
   const existingVault = await env.DB.prepare("SELECT iv, ciphertext FROM roster_vault WHERE id = 1").first();

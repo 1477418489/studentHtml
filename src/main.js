@@ -11,6 +11,33 @@ const STATUS = [
   { value: "absent", label: "缺席" },
   { value: "leave", label: "请假" }
 ];
+const ROSTER_COLUMNS = [
+  { key: "serial", label: "序号", width: 60, min: 52, max: 120 },
+  { key: "studentName", label: "学生姓名", width: 140, min: 80, max: 320 },
+  { key: "className", label: "班级", width: 110, min: 75, max: 220 },
+  { key: "parentName", label: "家长姓名", width: 135, min: 90, max: 300 },
+  { key: "phone", label: "家长电话", width: 155, min: 110, max: 280 },
+  { key: "address", label: "地址", width: 390, min: 160, max: 720 },
+  { key: "status", label: "签到状态", width: 130, min: 118, max: 190 },
+  { key: "actions", label: "操作", width: 150, min: 128, max: 240 }
+];
+const COLUMN_WIDTHS_KEY = "class-roster-column-widths";
+
+function clampColumnWidth(column, value) {
+  return Math.min(column.max, Math.max(column.min, Math.round(value)));
+}
+
+function loadColumnWidths() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLUMN_WIDTHS_KEY) || "{}");
+    return Object.fromEntries(ROSTER_COLUMNS.map((column) => [
+      column.key,
+      clampColumnWidth(column, Number(saved[column.key]) || column.width)
+    ]));
+  } catch {
+    return Object.fromEntries(ROSTER_COLUMNS.map((column) => [column.key, column.width]));
+  }
+}
 
 const state = {
   password: "",
@@ -29,7 +56,9 @@ const state = {
   page: 0,
   saving: false,
   authError: "",
-  importPreview: null
+  importPreview: null,
+  importMode: "merge",
+  columnWidths: loadColumnWidths()
 };
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -66,9 +95,9 @@ function renderLogin() {
         ${isSetup ? `<label for="setup-token">首次设置码</label>
         <input id="setup-token" name="setupToken" type="password" autocomplete="off" required autofocus />` : ""}
         ${canSubmit ? `<label for="password">${isSetup ? "设置访问密码" : "访问密码"}</label>
-        <input id="password" name="password" type="password" autocomplete="${isSetup ? "new-password" : "current-password"}" maxlength="512" required ${isSetup ? "" : "autofocus"} />` : ""}
+        <input id="password" name="password" type="password" autocomplete="${isSetup ? "new-password" : "current-password"}" required ${isSetup ? "" : "autofocus"} />` : ""}
         ${isSetup ? `<label for="password-confirm">确认访问密码</label>
-        <input id="password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" maxlength="512" required />` : ""}
+        <input id="password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" required />` : ""}
         <p class="auth-error" role="alert">${escapeHtml(unavailableMessage)}</p>
         ${canSubmit ? `<button class="button button-primary auth-submit" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? (isSetup ? "正在创建…" : "正在解锁…") : isSetup ? "创建密码并进入" : "进入名册"}</button>` : ""}
       </form>
@@ -112,7 +141,7 @@ function sortHeader(key, label) {
 }
 
 function renderRecordRow(record, index) {
-  return `<tr>
+  return `<tr class="roster-row status-${escapeHtml(record.status || "pending")}">
     <td class="serial-cell">${index + 1}</td>
     <td class="student-cell"><strong>${escapeHtml(record.studentName)}</strong></td>
     <td>${escapeHtml(record.className)}</td>
@@ -124,18 +153,16 @@ function renderRecordRow(record, index) {
   </tr>`;
 }
 
-function renderMobileRecord(record, index) {
-  return `<article class="mobile-record">
+function renderMobileRecord(record) {
+  return `<article class="mobile-record status-${escapeHtml(record.status || "pending")}">
     <div class="mobile-record-head">
-      <div><span class="mobile-serial">${index + 1}</span><h3>${escapeHtml(record.studentName)}</h3><span class="mobile-class">${escapeHtml(record.className)}</span></div>
-      <button class="text-button" type="button" data-action="edit" data-id="${escapeHtml(record.id)}">编辑</button>
+      <div class="mobile-record-identity"><h3>${escapeHtml(record.studentName)}</h3></div>
+      <div class="mobile-record-actions">${statusSelect(record, true)}<button class="text-button" type="button" data-action="edit" data-id="${escapeHtml(record.id)}">编辑</button></div>
     </div>
     <div class="mobile-fields">
-      <div><span>家长姓名</span><strong>${escapeHtml(record.parentName) || "—"}</strong></div>
-      <div><span>家长电话</span>${record.phone ? `<a class="phone-link" href="tel:${encodeURIComponent(record.phone)}">${escapeHtml(record.phone)}</a>` : "<strong>—</strong>"}</div>
-      <div class="mobile-address"><span>地址</span><strong>${escapeHtml(record.address) || "—"}</strong></div>
+      <div class="mobile-class-field"><span>班级</span><strong>${escapeHtml(record.className) || "—"}</strong></div>
+      <div class="mobile-address"><span>地址</span><strong title="${escapeHtml(record.address)}">${escapeHtml(record.address) || "—"}</strong></div>
     </div>
-    <div class="mobile-record-foot"><span>签到状态</span>${statusSelect(record, true)}</div>
   </article>`;
 }
 
@@ -143,6 +170,21 @@ function renderPager(total) {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (pages < 2) return "";
   return `<div class="pager"><span>第 ${state.page + 1} / ${pages} 页</span><div><button class="button button-secondary button-small" type="button" data-action="page" data-page="${state.page - 1}" ${state.page === 0 ? "disabled" : ""}>上一页</button><button class="button button-secondary button-small" type="button" data-action="page" data-page="${state.page + 1}" ${state.page >= pages - 1 ? "disabled" : ""}>下一页</button></div></div>`;
+}
+
+function renderRosterHeader(column) {
+  const content = {
+    serial: "序号",
+    studentName: "学生姓名",
+    className: sortHeader("className", "班级"),
+    parentName: "家长姓名",
+    phone: "家长电话",
+    address: sortHeader("address", "地址"),
+    status: "签到状态",
+    actions: "操作"
+  }[column.key];
+  const width = state.columnWidths[column.key];
+  return `<th${column.key === "serial" ? ' class="serial-cell"' : ""}>${content}<span class="column-resizer" data-column-resizer="${column.key}" role="separator" aria-orientation="vertical" aria-label="调整${column.label}列宽" aria-valuemin="${column.min}" aria-valuemax="${column.max}" aria-valuenow="${width}" title="拖动调整列宽" tabindex="0"></span></th>`;
 }
 
 function renderRoster() {
@@ -153,18 +195,22 @@ function renderRoster() {
   const classes = [...new Set(state.records.map((record) => record.className).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
   const offset = state.page * PAGE_SIZE;
+  const tableWidth = ROSTER_COLUMNS.reduce((total, column) => total + state.columnWidths[column.key], 0);
+  const mobileSortValue = `${state.sortKey}:${state.sortDirection}`;
   return `<section class="roster-view">
     <div class="roster-toolbar">
       <div class="search-wrap"><input type="search" name="search" value="${escapeHtml(state.search)}" placeholder="搜索姓名、班级、电话或地址" aria-label="搜索名册" /></div>
       <label class="filter-control"><span>班级</span><select name="classFilter"><option value="">全部</option>${classes.map((name) => `<option value="${escapeHtml(name)}" ${state.classFilter === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>
       <label class="filter-control"><span>状态</span><select name="statusFilter"><option value="">全部</option>${STATUS.map((item) => `<option value="${item.value}" ${state.statusFilter === item.value ? "selected" : ""}>${item.label}</option>`).join("")}</select></label>
+      <label class="filter-control mobile-sort-control"><span>排序</span><select name="mobileSort" aria-label="按班级或地址排序"><option value="className:1" ${mobileSortValue === "className:1" ? "selected" : ""}>班级升序</option><option value="className:-1" ${mobileSortValue === "className:-1" ? "selected" : ""}>班级降序</option><option value="address:1" ${mobileSortValue === "address:1" ? "selected" : ""}>地址升序</option><option value="address:-1" ${mobileSortValue === "address:-1" ? "selected" : ""}>地址降序</option></select></label>
       <span class="result-count">${visible.length} 条记录</span>
     </div>
-    ${visible.length ? `<div class="table-scroll"><table class="roster-table">
-      <thead><tr><th class="serial-cell">序号</th><th>学生姓名</th><th>${sortHeader("className", "班级")}</th><th>家长姓名</th><th>家长电话</th><th>${sortHeader("address", "地址")}</th><th>签到状态</th><th>操作</th></tr></thead>
+    ${visible.length ? `<div class="table-scroll"><table class="roster-table" style="--table-width:${tableWidth}px">
+      <colgroup>${ROSTER_COLUMNS.map((column) => `<col data-column="${column.key}" style="width:${state.columnWidths[column.key]}px" />`).join("")}</colgroup>
+      <thead><tr>${ROSTER_COLUMNS.map(renderRosterHeader).join("")}</tr></thead>
       <tbody>${pageRows.map((record, index) => renderRecordRow(record, offset + index)).join("")}</tbody>
     </table></div>
-    <div class="mobile-records">${pageRows.map((record, index) => renderMobileRecord(record, offset + index)).join("")}</div>
+    <div class="mobile-records">${pageRows.map(renderMobileRecord).join("")}</div>
     ${renderPager(visible.length)}` : `<div class="empty-state"><span class="empty-mark" aria-hidden="true"></span><h2>${state.records.length ? "没有匹配的学生" : "暂无学生"}</h2>${state.records.length ? "" : `<button class="button button-primary" type="button" data-action="new-record">添加学生</button>`}</div>`}
   </section>`;
 }
@@ -182,7 +228,12 @@ function groupRecords(key) {
 }
 
 function renderDistribution(summary) {
-  const colors = { checked: "#167b69", pending: "#8b9290", absent: "#c74d4d", leave: "#c28726" };
+  const colors = {
+    checked: "var(--status-checked-mark)",
+    pending: "var(--status-pending-mark)",
+    absent: "var(--status-absent-mark)",
+    leave: "var(--status-leave-mark)"
+  };
   return `<div class="distribution-list">${STATUS.map((item) => {
     const amount = summary[item.value];
     const percent = summary.total ? Math.round((amount / summary.total) * 100) : 0;
@@ -219,8 +270,71 @@ function renderWorkspace() {
     </main>
   </div>
   <dialog id="record-dialog" class="dialog"></dialog>
-  <dialog id="import-dialog" class="dialog import-dialog"><form method="dialog" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">名册数据</span><h2>导入 Excel</h2></div><button class="close-button" value="cancel" aria-label="关闭" formnovalidate>×</button></div><label class="file-picker"><span>选择文件</span><input id="import-file" type="file" accept=".xlsx,.xls,.csv" /></label><div id="import-preview" class="import-preview"></div><div class="dialog-actions"><button class="button button-secondary" value="cancel">取消</button><button class="button button-primary" type="button" data-action="confirm-import" disabled>导入</button></div></form></dialog>`;
+  <dialog id="import-dialog" class="dialog import-dialog"><form method="dialog" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">名册数据</span><h2>导入 Excel</h2></div><button class="close-button" value="cancel" aria-label="关闭" formnovalidate>×</button></div><label class="file-picker"><span>选择文件</span><input id="import-file" type="file" accept=".xlsx,.xls,.csv" /></label><fieldset class="import-mode"><legend>导入方式</legend><label class="import-mode-option"><input type="radio" name="importMode" value="merge" checked /><span><strong>更新并追加</strong><small>按学生姓名和班级匹配，更新已有记录并新增未匹配记录</small></span></label><label class="import-mode-option import-mode-danger"><input type="radio" name="importMode" value="replace" /><span><strong>清空全部后导入</strong><small>先删除当前名册，再导入文件中的记录</small></span></label></fieldset><div id="import-preview" class="import-preview"></div><div class="dialog-actions"><button class="button button-secondary" value="cancel">取消</button><button class="button button-primary" type="button" data-action="confirm-import" disabled>导入</button></div></form></dialog>`;
   bindWorkspaceEvents();
+  bindRosterColumnResizeEvents();
+}
+
+function setRosterColumnWidth(table, handle, column, width) {
+  const nextWidth = clampColumnWidth(column, width);
+  state.columnWidths[column.key] = nextWidth;
+  table.querySelector(`col[data-column="${column.key}"]`)?.style.setProperty("width", `${nextWidth}px`);
+  handle.setAttribute("aria-valuenow", String(nextWidth));
+  const totalWidth = ROSTER_COLUMNS.reduce((total, item) => total + state.columnWidths[item.key], 0);
+  table.style.setProperty("--table-width", `${totalWidth}px`);
+}
+
+function saveRosterColumnWidths() {
+  try {
+    localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(state.columnWidths));
+  } catch {
+    return;
+  }
+}
+
+function bindRosterColumnResizeEvents() {
+  const table = document.querySelector(".roster-table");
+  if (!table) return;
+
+  table.querySelectorAll("[data-column-resizer]").forEach((handle) => {
+    const column = ROSTER_COLUMNS.find((item) => item.key === handle.dataset.columnResizer);
+    if (!column) return;
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startWidth = state.columnWidths[column.key];
+      handle.classList.add("is-dragging");
+      handle.setPointerCapture(pointerId);
+
+      const move = (moveEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        setRosterColumnWidth(table, handle, column, startWidth + moveEvent.clientX - startX);
+      };
+      const finish = (finishEvent) => {
+        if (finishEvent.pointerId !== pointerId) return;
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", finish);
+        handle.removeEventListener("pointercancel", finish);
+        handle.classList.remove("is-dragging");
+        saveRosterColumnWidths();
+      };
+
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", finish);
+      handle.addEventListener("pointercancel", finish);
+    });
+
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const change = event.key === "ArrowRight" ? 10 : -10;
+      setRosterColumnWidth(table, handle, column, state.columnWidths[column.key] + change);
+      saveRosterColumnWidths();
+    });
+  });
 }
 
 function render() {
@@ -278,7 +392,6 @@ async function requestJson(path, method, body) {
 function errorMessage(error) {
   if (error.message === "invalid_password") return "密码错误";
   if (error.message === "invalid_setup_token") return "设置码错误或已失效";
-  if (error.message === "password_too_long") return "访问密码不能超过 512 个字符";
   if (error.message === "already_initialized") return "名册已完成初始化，请刷新后使用访问密码登录";
   if (error.message === "legacy_password_required") return "此名册已有加密数据，需要恢复原访问密码";
   if (error.message === "password_not_configured") return "访问密码尚未配置，请检查部署设置";
@@ -442,8 +555,17 @@ function bindWorkspaceEvents() {
       state.statusFilter = target.value;
       state.page = 0;
       render();
+    } else if (target.matches("[name=mobileSort]")) {
+      const [key, direction] = target.value.split(":");
+      state.sortKey = key === "address" ? "address" : "className";
+      state.sortDirection = direction === "-1" ? -1 : 1;
+      state.page = 0;
+      render();
     } else if (target.matches("[data-action=status]")) {
       await updateStatus(target.dataset.id, target.value);
+    } else if (target.matches("[name=importMode]")) {
+      state.importMode = target.value === "replace" ? "replace" : "merge";
+      renderImportPreview();
     } else if (target.matches("#import-file")) {
       await readImportFile(target.files?.[0]);
     }
@@ -518,8 +640,10 @@ async function submitRecordForm(form) {
 
 function openImportDialog() {
   state.importPreview = null;
+  state.importMode = "merge";
   const dialog = document.querySelector("#import-dialog");
   dialog.querySelector("#import-file").value = "";
+  dialog.querySelector('[name="importMode"][value="merge"]').checked = true;
   renderImportPreview();
   dialog.showModal();
 }
@@ -553,6 +677,24 @@ function normalizeImportedStatus(value) {
   return "pending";
 }
 
+function importRecordKey(record) {
+  const normalize = (value) => String(value || "").normalize("NFKC").trim().toLocaleLowerCase("zh-CN");
+  return `${normalize(record.studentName)}\u0000${normalize(record.className)}`;
+}
+
+function countImportChanges(imported) {
+  const keys = new Set(state.importMode === "replace" ? [] : state.records.map(importRecordKey));
+  let added = 0;
+  let updated = 0;
+  for (const record of imported) {
+    const key = importRecordKey(record);
+    if (keys.has(key)) updated += 1;
+    else added += 1;
+    keys.add(key);
+  }
+  return { added, updated };
+}
+
 async function readImportFile(file) {
   if (!file) return;
   try {
@@ -562,6 +704,7 @@ async function readImportFile(file) {
     if (!rows.length) throw new Error("empty_file");
     const columns = findImportColumns(rows[0]);
     if (columns.studentName < 0 || columns.className < 0) throw new Error("missing_columns");
+    const providedFields = Object.entries(columns).filter(([, column]) => column >= 0).map(([field]) => field);
     const imported = [];
     let skipped = 0;
     for (const row of rows.slice(1)) {
@@ -572,16 +715,19 @@ async function readImportFile(file) {
         continue;
       }
       const read = (column) => column < 0 ? "" : String(row[column] || "").trim();
-      imported.push(normalizeRecord({
-        id: crypto.randomUUID(),
-        studentName,
-        className,
-        parentName: read(columns.parentName),
-        phone: read(columns.phone),
-        address: read(columns.address),
-        status: normalizeImportedStatus(read(columns.status)),
-        updatedAt: new Date().toISOString()
-      }));
+      imported.push({
+        ...normalizeRecord({
+          id: crypto.randomUUID(),
+          studentName,
+          className,
+          parentName: read(columns.parentName),
+          phone: read(columns.phone),
+          address: read(columns.address),
+          status: normalizeImportedStatus(read(columns.status)),
+          updatedAt: new Date().toISOString()
+        }),
+        providedFields
+      });
     }
     state.importPreview = { fileName: file.name, imported, skipped, error: imported.length ? "" : "no_records" };
   } catch (error) {
@@ -613,16 +759,42 @@ function renderImportPreview() {
     return;
   }
   const samples = preview.imported.slice(0, 4);
-  output.innerHTML = `<div class="import-summary"><strong>${preview.imported.length} 条可导入</strong><span>${preview.skipped ? `跳过 ${preview.skipped} 行` : ""}</span><span class="file-name">${escapeHtml(preview.fileName)}</span></div><div class="preview-table-wrap"><table class="preview-table"><thead><tr><th>学生姓名</th><th>班级</th><th>家长姓名</th><th>签到状态</th></tr></thead><tbody>${samples.map((item) => `<tr><td>${escapeHtml(item.studentName)}</td><td>${escapeHtml(item.className)}</td><td>${escapeHtml(item.parentName)}</td><td>${statusLabel(item.status)}</td></tr>`).join("")}</tbody></table></div>`;
+  const counts = countImportChanges(preview.imported);
+  const summary = state.importMode === "replace"
+    ? `清空 ${state.records.length} 条，导入 ${counts.added + counts.updated} 条`
+    : `更新 ${counts.updated} 条，新增 ${counts.added} 条`;
+  output.innerHTML = `<div class="import-summary"><strong>${summary}</strong><span>${preview.skipped ? `跳过 ${preview.skipped} 行` : ""}</span><span class="file-name">${escapeHtml(preview.fileName)}</span></div><div class="preview-table-wrap"><table class="preview-table"><thead><tr><th>学生姓名</th><th>班级</th><th>家长姓名</th><th>签到状态</th></tr></thead><tbody>${samples.map((item) => `<tr><td>${escapeHtml(item.studentName)}</td><td>${escapeHtml(item.className)}</td><td>${escapeHtml(item.parentName)}</td><td>${statusLabel(item.status)}</td></tr>`).join("")}</tbody></table></div>`;
   button.disabled = !preview.imported.length || state.saving;
-  button.textContent = `导入 ${preview.imported.length} 条`;
+  button.textContent = state.importMode === "replace"
+    ? `清空并导入 ${preview.imported.length} 条`
+    : `更新并导入 ${preview.imported.length} 条`;
 }
 
 async function confirmImport() {
   const preview = state.importPreview;
   if (!preview?.imported.length || state.saving) return;
+  if (state.importMode === "replace" && !window.confirm(`将清空现有 ${state.records.length} 条名册记录，并导入文件中的数据。继续吗？`)) return;
   const previous = structuredClone(state.records);
-  state.records = [...state.records, ...preview.imported];
+  const nextRecords = state.importMode === "replace" ? [] : structuredClone(state.records);
+  const recordIndexes = new Map();
+  nextRecords.forEach((record, index) => {
+    const key = importRecordKey(record);
+    if (!recordIndexes.has(key)) recordIndexes.set(key, index);
+  });
+  for (const importedRecord of preview.imported) {
+    const { providedFields, ...record } = importedRecord;
+    const key = importRecordKey(record);
+    const existingIndex = recordIndexes.get(key);
+    if (existingIndex !== undefined) {
+      const merged = { ...nextRecords[existingIndex], updatedAt: new Date().toISOString() };
+      for (const field of providedFields) merged[field] = record[field];
+      nextRecords[existingIndex] = normalizeRecord(merged);
+    } else {
+      recordIndexes.set(key, nextRecords.length);
+      nextRecords.push(normalizeRecord(record));
+    }
+  }
+  state.records = nextRecords;
   state.page = 0;
   document.querySelector("#import-dialog")?.close();
   await saveWithSnapshot(previous);
