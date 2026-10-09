@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "wrangler d1 migrations apply DB --local --yes && wrangler dev --local",
+    "dev": "wrangler d1 migrations apply DB --local && wrangler dev --local",
     "build": "vite build",
     "deploy": "npm run build && node scripts/deploy.mjs"
   },

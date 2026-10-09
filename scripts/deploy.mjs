@@ -137,7 +137,7 @@ async function main() {
   const saveConfig = (value) => writeFile(configPath, `${JSON.stringify(value, null, 2)}\n`);
 
   await bindDatabase(binding, run, saveConfig, config);
-  await run(["d1", "migrations", "apply", "DB", "--remote", "--yes"]);
+  await run(["d1", "migrations", "apply", "DB", "--remote"]);
 
   const initialization = await readInitializationState(run);
   let secrets = null;
@@ -148,7 +148,7 @@ async function main() {
     }
   }
 
-  await run(["deploy", "--yes"]);
+  await run(["deploy"]);
   if (initialization.initialized) {
     console.log("部署完成，已有访问密码和名册数据已保留。");
     return;
