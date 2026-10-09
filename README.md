@@ -11,7 +11,7 @@ Cloudflare Workers + D1 名册管理应用。学生信息在浏览器中加密�
 3. 配置 Workers Builds：生产分支选择 `main`，根目录留空，Build command 留空，Deploy command 填 `npm run deploy`，Node.js 版本设为 `22`。
 4. 创建 Cloudflare API Token 并在 Builds 中选择它。Token 需要目标账号的 `Workers Scripts: Edit`、`D1: Edit` 和账号读取权限。
 5. 点击 `Save and Deploy`。首次部署成功后，在构建日志里复制“首次设置码（SETUP_TOKEN）”。
-6. 打开部署日志中的 `workers.dev` 地址，输入设置码，然后自行设置 12–128 个字符的名册访问密码。
+6. 打开部署日志中的 `workers.dev` 地址，输入设置码，然后自行设置名册访问密码。
 
 `npm run deploy` 会按 `wrangler.jsonc` 中的数据库名称查找或创建 D1，应用 `migrations/` 中未执行的迁移，然后构建并部署 Worker。Cloudflare Builds 每次都从 GitHub 获取代码，数据库 ID 占位值可以保留在仓库中；脚本会复用账号里同名的数据库。
 
@@ -42,7 +42,7 @@ npm run deploy
 
 ## 数据与密码
 
-- 首次访问密码由用户自行设置，不会在部署时生成。D1 的 `roster_auth` 表只保存 PBKDF2 派生的校验值和随机盐，不保存密码明文。
+- 首次访问密码由用户自行设置，不会在部署时生成；不要求特定长度或字符组合。D1 的 `roster_auth` 表只保存 PBKDF2 派生的校验值和随机盐，不保存密码明文。
 - 同一密码用于浏览器端 AES-256-GCM 加密名册数据。密码会通过 HTTPS 发给 Worker 做校验；Worker 运行时会收到密码，因此应保护 Cloudflare 账号和部署权限。
 - 学生、家长、电话、地址、班级及签到状态都在加密 JSON 内。D1 另保存随机盐、随机 IV 和更新时间。
 - 首次设置码是单独的一次性凭据，只用于防止他人在初始化前抢先设置密码。拥有 Cloudflare 构建日志访问权限的人可以看到它；创建密码后该码不能再次使用。

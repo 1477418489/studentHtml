@@ -110,9 +110,8 @@ async function handleSetup(request, env) {
   if (typeof setupToken !== "string" || !constantTimeEqual(setupToken, env.SETUP_TOKEN)) {
     return json({ error: "invalid_setup_token" }, 401);
   }
-  if (typeof password !== "string" || password.length < 12 || password.length > 128) {
-    return json({ error: "weak_password" }, 400);
-  }
+  if (typeof password !== "string" || password.length === 0) return json({ error: "invalid_password" }, 400);
+  if (password.length > 512) return json({ error: "password_too_long" }, 400);
 
   if (await readAuthRecord(env.DB)) return json({ error: "already_initialized" }, 409);
   const existingVault = await env.DB.prepare("SELECT iv, ciphertext FROM roster_vault WHERE id = 1").first();

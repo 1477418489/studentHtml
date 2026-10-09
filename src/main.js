@@ -66,9 +66,9 @@ function renderLogin() {
         ${isSetup ? `<label for="setup-token">首次设置码</label>
         <input id="setup-token" name="setupToken" type="password" autocomplete="off" required autofocus />` : ""}
         ${canSubmit ? `<label for="password">${isSetup ? "设置访问密码" : "访问密码"}</label>
-        <input id="password" name="password" type="password" autocomplete="${isSetup ? "new-password" : "current-password"}" minlength="${isSetup ? "12" : "1"}" maxlength="128" required ${isSetup ? "" : "autofocus"} />` : ""}
+        <input id="password" name="password" type="password" autocomplete="${isSetup ? "new-password" : "current-password"}" maxlength="512" required ${isSetup ? "" : "autofocus"} />` : ""}
         ${isSetup ? `<label for="password-confirm">确认访问密码</label>
-        <input id="password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />` : ""}
+        <input id="password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" maxlength="512" required />` : ""}
         <p class="auth-error" role="alert">${escapeHtml(unavailableMessage)}</p>
         ${canSubmit ? `<button class="button button-primary auth-submit" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? (isSetup ? "正在创建…" : "正在解锁…") : isSetup ? "创建密码并进入" : "进入名册"}</button>` : ""}
       </form>
@@ -278,7 +278,7 @@ async function requestJson(path, method, body) {
 function errorMessage(error) {
   if (error.message === "invalid_password") return "密码错误";
   if (error.message === "invalid_setup_token") return "设置码错误或已失效";
-  if (error.message === "weak_password") return "访问密码需要设置为 12 至 128 个字符";
+  if (error.message === "password_too_long") return "访问密码不能超过 512 个字符";
   if (error.message === "already_initialized") return "名册已完成初始化，请刷新后使用访问密码登录";
   if (error.message === "legacy_password_required") return "此名册已有加密数据，需要恢复原访问密码";
   if (error.message === "password_not_configured") return "访问密码尚未配置，请检查部署设置";
