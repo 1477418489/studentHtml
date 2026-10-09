@@ -14,6 +14,7 @@ const STATUS = [
 
 const state = {
   password: "",
+  authMode: "loading",
   key: null,
   salt: "",
   records: [],
@@ -48,22 +49,32 @@ function statusSelect(record, compact = false) {
 }
 
 function renderLogin() {
+  const isSetup = state.authMode === "setup";
+  const canSubmit = isSetup || state.authMode === "login";
+  const title = isSetup ? "创建访问密码" : state.authMode === "loading" ? "连接数据服务" : "名册管理";
+  const unavailableMessage = state.authMode === "unavailable" && !state.authError
+    ? "访问密码尚未配置，请检查部署设置"
+    : state.authError;
   app.innerHTML = `<main class="auth-shell">
     <section class="auth-panel" aria-labelledby="login-title">
       <div class="brand-lockup">
         <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
         <span>班级名册</span>
       </div>
-      <h1 id="login-title">名册管理</h1>
+      <h1 id="login-title">${title}</h1>
       <form id="unlock-form">
-        <label for="password">访问密码</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus />
-        <p class="auth-error" role="alert">${escapeHtml(state.authError)}</p>
-        <button class="button button-primary auth-submit" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? "正在解锁…" : "进入名册"}</button>
+        ${isSetup ? `<label for="setup-token">首次设置码</label>
+        <input id="setup-token" name="setupToken" type="password" autocomplete="off" required autofocus />` : ""}
+        ${canSubmit ? `<label for="password">${isSetup ? "设置访问密码" : "访问密码"}</label>
+        <input id="password" name="password" type="password" autocomplete="${isSetup ? "new-password" : "current-password"}" minlength="${isSetup ? "12" : "1"}" maxlength="128" required ${isSetup ? "" : "autofocus"} />` : ""}
+        ${isSetup ? `<label for="password-confirm">确认访问密码</label>
+        <input id="password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />` : ""}
+        <p class="auth-error" role="alert">${escapeHtml(unavailableMessage)}</p>
+        ${canSubmit ? `<button class="button button-primary auth-submit" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? (isSetup ? "正在创建…" : "正在解锁…") : isSetup ? "创建密码并进入" : "进入名册"}</button>` : ""}
       </form>
     </section>
   </main>`;
-  document.querySelector("#unlock-form")?.addEventListener("submit", handleUnlock);
+  if (canSubmit) document.querySelector("#unlock-form")?.addEventListener("submit", handleUnlock);
 }
 
 function summarize(records) {
@@ -266,21 +277,47 @@ async function requestJson(path, method, body) {
 
 function errorMessage(error) {
   if (error.message === "invalid_password") return "密码错误";
-  if (error.message === "password_not_configured") return "访问密码尚未配置，请检查 Cloudflare Secret";
+  if (error.message === "invalid_setup_token") return "设置码错误或已失效";
+  if (error.message === "weak_password") return "访问密码需要设置为 12 至 128 个字符";
+  if (error.message === "already_initialized") return "名册已完成初始化，请刷新后使用访问密码登录";
+  if (error.message === "legacy_password_required") return "此名册已有加密数据，需要恢复原访问密码";
+  if (error.message === "password_not_configured") return "访问密码尚未配置，请检查部署设置";
   if (error.message === "database_not_configured" || error.message === "database_error") return "数据服务暂不可用，请检查 D1 配置";
   if (error.message === "Failed to fetch") return "无法连接数据服务，请检查网络或部署配置";
   return "数据无法解密，密码或名册数据不匹配";
 }
 
+async function initializeAuth() {
+  try {
+    const status = await requestJson("/api/status", "GET");
+    state.authMode = ["login", "setup"].includes(status.mode) ? status.mode : "unavailable";
+    if (state.authMode === "unavailable") state.authError = "访问密码尚未配置，请检查部署设置";
+  } catch (error) {
+    state.authMode = "unavailable";
+    state.authError = errorMessage(error);
+  }
+  renderLogin();
+}
+
 async function handleUnlock(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const password = String(new FormData(form).get("password") || "");
+  const formData = new FormData(form);
+  const password = String(formData.get("password") || "");
+  const isSetup = state.authMode === "setup";
+  if (isSetup && password !== String(formData.get("passwordConfirm") || "")) {
+    state.authError = "两次输入的访问密码不一致";
+    renderLogin();
+    return;
+  }
   state.authError = "";
   state.saving = true;
   renderLogin();
   try {
-    const vault = await requestJson("/api/unlock", "POST", { password });
+    const vault = isSetup
+      ? await requestJson("/api/setup", "POST", { setupToken: String(formData.get("setupToken") || ""), password })
+      : await requestJson("/api/unlock", "POST", { password });
+    state.authMode = "login";
     const key = await deriveKey(password, vault.salt);
     let records = [];
     if (vault.iv && vault.ciphertext) {
@@ -308,9 +345,10 @@ async function handleUnlock(event) {
     state.salt = "";
     state.records = [];
     state.saving = false;
-    state.authError = error.status === 401 || error.message === "invalid_password" ? "密码错误" : errorMessage(error);
+    if (error.message === "already_initialized") state.authMode = "login";
+    state.authError = errorMessage(error);
     renderLogin();
-    document.querySelector("#password")?.focus();
+    document.querySelector(isSetup ? "#setup-token" : "#password")?.focus();
   }
 }
 
@@ -607,3 +645,4 @@ async function lockApp() {
 }
 
 render();
+initializeAuth();
