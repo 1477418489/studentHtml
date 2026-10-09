@@ -197,12 +197,14 @@ function renderRoster() {
   const offset = state.page * PAGE_SIZE;
   const tableWidth = ROSTER_COLUMNS.reduce((total, column) => total + state.columnWidths[column.key], 0);
   const mobileSortValue = `${state.sortKey}:${state.sortDirection}`;
+  const resettableCount = state.records.filter((record) => (record.status || "pending") !== "pending").length;
   return `<section class="roster-view">
     <div class="roster-toolbar">
       <div class="search-wrap"><input type="search" name="search" value="${escapeHtml(state.search)}" placeholder="搜索姓名、班级、电话或地址" aria-label="搜索名册" /></div>
       <label class="filter-control"><span>班级</span><select name="classFilter"><option value="">全部</option>${classes.map((name) => `<option value="${escapeHtml(name)}" ${state.classFilter === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>
       <label class="filter-control"><span>状态</span><select name="statusFilter"><option value="">全部</option>${STATUS.map((item) => `<option value="${item.value}" ${state.statusFilter === item.value ? "selected" : ""}>${item.label}</option>`).join("")}</select></label>
       <label class="filter-control mobile-sort-control"><span>排序</span><select name="mobileSort" aria-label="按班级或地址排序"><option value="className:1" ${mobileSortValue === "className:1" ? "selected" : ""}>班级升序</option><option value="className:-1" ${mobileSortValue === "className:-1" ? "selected" : ""}>班级降序</option><option value="address:1" ${mobileSortValue === "address:1" ? "selected" : ""}>地址升序</option><option value="address:-1" ${mobileSortValue === "address:-1" ? "selected" : ""}>地址降序</option></select></label>
+      <button class="button button-secondary button-small reset-status-button" type="button" data-action="reset-status" title="重置全体学生的签到状态" ${!resettableCount || state.saving ? "disabled" : ""}>重置签到状态</button>
       <span class="result-count">${visible.length} 条记录</span>
     </div>
     ${visible.length ? `<div class="table-scroll"><table class="roster-table" style="--table-width:${tableWidth}px">
@@ -536,6 +538,8 @@ function bindWorkspaceEvents() {
       openRecordDialog(state.records.find((record) => record.id === button.dataset.id));
     } else if (action === "delete") {
       await deleteRecord(button.dataset.id);
+    } else if (action === "reset-status") {
+      await resetAttendanceStatuses();
     } else if (action === "import") {
       openImportDialog();
     } else if (action === "confirm-import") {
@@ -596,6 +600,21 @@ async function updateStatus(id, status) {
   if (!record) return;
   record.status = status;
   record.updatedAt = new Date().toISOString();
+  await saveWithSnapshot(previous);
+}
+
+async function resetAttendanceStatuses() {
+  if (state.saving) return;
+  const resettableCount = state.records.filter((record) => (record.status || "pending") !== "pending").length;
+  if (!resettableCount || !window.confirm(`将全体 ${state.records.length} 名学生的签到状态重置为“未签到”，其中 ${resettableCount} 名学生的状态会变化。继续吗？`)) return;
+
+  const previous = structuredClone(state.records);
+  const updatedAt = new Date().toISOString();
+  state.records = state.records.map((record) => (record.status || "pending") === "pending"
+    ? record
+    : { ...record, status: "pending", updatedAt });
+  state.statusFilter = "";
+  state.page = 0;
   await saveWithSnapshot(previous);
 }
 
