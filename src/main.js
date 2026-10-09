@@ -153,10 +153,10 @@ function renderRecordRow(record, index) {
   </tr>`;
 }
 
-function renderMobileRecord(record) {
+function renderMobileRecord(record, index) {
   return `<article class="mobile-record status-${escapeHtml(record.status || "pending")}">
     <div class="mobile-record-head">
-      <div class="mobile-record-identity"><h3>${escapeHtml(record.studentName)}</h3></div>
+      <div class="mobile-record-identity"><span class="mobile-serial">${index + 1}</span><h3>${escapeHtml(record.studentName)}</h3></div>
       <div class="mobile-record-actions">${statusSelect(record, true)}<button class="text-button" type="button" data-action="edit" data-id="${escapeHtml(record.id)}">编辑</button></div>
     </div>
     <div class="mobile-fields">
@@ -210,7 +210,7 @@ function renderRoster() {
       <thead><tr>${ROSTER_COLUMNS.map(renderRosterHeader).join("")}</tr></thead>
       <tbody>${pageRows.map((record, index) => renderRecordRow(record, offset + index)).join("")}</tbody>
     </table></div>
-    <div class="mobile-records">${pageRows.map(renderMobileRecord).join("")}</div>
+    <div class="mobile-records">${pageRows.map((record, index) => renderMobileRecord(record, offset + index)).join("")}</div>
     ${renderPager(visible.length)}` : `<div class="empty-state"><span class="empty-mark" aria-hidden="true"></span><h2>${state.records.length ? "没有匹配的学生" : "暂无学生"}</h2>${state.records.length ? "" : `<button class="button button-primary" type="button" data-action="new-record">添加学生</button>`}</div>`}
   </section>`;
 }

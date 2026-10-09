@@ -363,16 +363,17 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   .mobile-record.status-absent { border-left: 3px solid var(--status-absent-mark); }
   .mobile-record.status-leave { border-left: 3px solid var(--status-leave-mark); }
   .mobile-record-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .mobile-record-identity { min-width: 0; flex: 1; }
-  .mobile-record-head h3 { overflow: hidden; margin: 0; color: var(--ink); font-size: 15px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-record-identity { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
+  .mobile-serial { width: 20px; flex: none; color: var(--quiet); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+  .mobile-record-head h3 { min-width: 0; overflow: hidden; margin: 0; color: var(--ink); font-size: 15px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-record-actions { display: flex; align-items: center; gap: 7px; flex: none; }
   .mobile-record-actions .status-select { width: 90px; height: 34px; }
   .mobile-record-actions .text-button { flex: none; }
   .mobile-fields { display: grid; gap: 7px; padding-top: 10px; }
   .mobile-fields > div { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
   .mobile-fields span { width: 30px; flex: none; color: var(--muted); font-size: 10px; }
-  .mobile-fields strong { min-width: 0; overflow: hidden; color: #34423b; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-address strong { flex: 1; }
+  .mobile-fields strong { min-width: 0; color: #34423b; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+  .mobile-address strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pager { padding: 13px 0; }
   .statistics-grid { grid-template-columns: 1fr; gap: 11px; }
   .stat-panel { padding: 15px 13px; }
