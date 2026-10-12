@@ -376,7 +376,7 @@ function renderJourneyDialog() {
   dialog.innerHTML = `<form id="journey-form" class="dialog-form" novalidate>
     <div class="dialog-heading"><div><span class="dialog-kicker">接送站点</span><h2 id="journey-dialog-title" tabindex="-1">站点与本趟线路</h2></div><button class="close-button" type="button" data-action="close-journey" aria-label="关闭站点设置">×</button></div>
     <div class="journey-editor-tabs" role="group" aria-label="站点设置内容"><button type="button" data-action="journey-editor-tab" data-tab="route" aria-pressed="${routeTab}">本趟线路（${draft.stopIds.length}）</button><button type="button" data-action="journey-editor-tab" data-tab="stations" aria-pressed="${!routeTab}">站点清单（${draft.stations.length}）</button></div>
-    ${routeTab ? `<div class="journey-editor-heading"><p class="journey-help">按运行顺序排列，用上移、下移调整。</p><div><button class="text-button" type="button" data-action="add-all-stops" data-idle-disabled="${!remaining.length}" ${!remaining.length ? "disabled" : ""}>全部加入</button><button class="text-button" type="button" data-action="clear-stops" data-idle-disabled="${!draft.stopIds.length}" ${!draft.stopIds.length ? "disabled" : ""}>清空</button></div></div>
+    ${routeTab ? `<div class="journey-editor-heading"><p class="journey-help">按运行顺序排列，用上移、下移调整。</p><div><button class="text-button" type="button" data-action="reverse-stops" data-idle-disabled="${draft.stopIds.length < 2}" ${draft.stopIds.length < 2 ? "disabled" : ""}>反序</button><button class="text-button" type="button" data-action="add-all-stops" data-idle-disabled="${!remaining.length}" ${!remaining.length ? "disabled" : ""}>全部加入</button><button class="text-button" type="button" data-action="clear-stops" data-idle-disabled="${!draft.stopIds.length}" ${!draft.stopIds.length ? "disabled" : ""}>清空</button></div></div>
       ${draft.stopIds.length ? `<ol class="journey-order" aria-label="本趟站点顺序">${draft.stopIds.map((id, index) => `<li data-stop-id="${escapeHtml(id)}"><span class="journey-order-number">${index + 1}</span><span class="journey-order-name">${escapeHtml(names.get(id)) || "未填写站名"}</span><div class="journey-order-actions"><button class="button button-secondary button-small" type="button" data-action="move-stop" data-id="${escapeHtml(id)}" data-direction="-1" data-idle-disabled="${index === 0}" ${index === 0 ? "disabled" : ""} aria-label="上移第 ${index + 1} 站：${escapeHtml(names.get(id))}">↑</button><button class="button button-secondary button-small" type="button" data-action="move-stop" data-id="${escapeHtml(id)}" data-direction="1" data-idle-disabled="${index === draft.stopIds.length - 1}" ${index === draft.stopIds.length - 1 ? "disabled" : ""} aria-label="下移第 ${index + 1} 站：${escapeHtml(names.get(id))}">↓</button><button class="text-button text-danger" type="button" data-action="remove-stop" data-id="${escapeHtml(id)}" aria-label="移出本趟：${escapeHtml(names.get(id))}">移出</button></div></li>`).join("")}</ol>` : `<p class="journey-empty">${draft.stations.length ? "还没选择站点。从下方加入，或点“全部加入”。" : "先在“站点清单”中添加接送地点，再选择本趟站点。"}</p>`}
       ${remaining.length ? `<h3 class="journey-section-title">可加入站点</h3><ul class="journey-available">${remaining.map((station) => `<li><span>${escapeHtml(station.name) || "未填写站名"}</span><button class="button button-secondary button-small" type="button" data-action="add-stop" data-id="${escapeHtml(station.id)}" aria-label="加入本趟：${escapeHtml(station.name)}">加入</button></li>`).join("")}</ul>` : ""}` : `<p class="journey-help">维护常用接送地点，再到“本趟线路”选择本次要经过的站点。站名最长 ${MAX_STATION_NAME_LENGTH} 个字符。</p>
       <label for="station-names">新增站点（每行一个，可粘贴多行）</label><textarea id="station-names" rows="3" placeholder="学校南门&#10;幸福里东门&#10;文化路口">${escapeHtml(state.stationNamesInput)}</textarea><div class="station-add-actions"><button class="button button-secondary" type="button" data-action="add-stations">添加到清单</button></div>
@@ -434,6 +434,8 @@ function editJourneyDraft(action, button) {
     if (index < 0 && draft.stations.some((station) => station.id === id)) draft.stopIds.push(id);
   } else if (action === "add-all-stops") {
     draft.stopIds.push(...draft.stations.map((station) => station.id).filter((id) => !draft.stopIds.includes(id)));
+  } else if (action === "reverse-stops") {
+    draft.stopIds.reverse();
   } else if (action === "remove-stop") {
     draft.stopIds = draft.stopIds.filter((stopId) => stopId !== id);
   } else if (action === "clear-stops") {
@@ -889,7 +891,7 @@ function bindWorkspaceEvents() {
       await nextJourneyStop();
     } else if (action === "close-journey") {
       if (!state.saving) document.querySelector("#journey-dialog").close();
-    } else if (["journey-editor-tab", "add-stations", "add-stop", "add-all-stops", "remove-stop", "clear-stops", "move-stop", "delete-station", "reset-journey-draft"].includes(action)) {
+    } else if (["journey-editor-tab", "add-stations", "add-stop", "add-all-stops", "reverse-stops", "remove-stop", "clear-stops", "move-stop", "delete-station", "reset-journey-draft"].includes(action)) {
       editJourneyDraft(action, button);
     } else if (action === "tab") {
       state.activeTab = button.dataset.tab;
