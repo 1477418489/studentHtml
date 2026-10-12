@@ -1,4 +1,5 @@
 import "./styles.css";
+import { version as APP_VERSION } from "../package.json";
 
 const app = document.querySelector("#app");
 const encoder = new TextEncoder();
@@ -94,7 +95,7 @@ function renderLogin() {
     <section class="auth-panel" aria-labelledby="login-title">
       <div class="brand-lockup">
         <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
-        <span>班级名册</span>
+        <span class="brand-text"><span>班级名册</span><span class="app-version" aria-label="应用版本 ${escapeHtml(APP_VERSION)}">v${escapeHtml(APP_VERSION)}</span></span>
       </div>
       <h1 id="login-title">${title}</h1>
       <form id="unlock-form">
@@ -290,7 +291,7 @@ function renderStatistics() {
 
 function renderWorkspace() {
   app.innerHTML = `<div class="app-shell">
-    <header class="topbar"><div class="topbar-inner"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>班级名册</span></div><div class="topbar-actions">${renderSaveIndicator()}<button class="button button-secondary button-small" type="button" data-action="logout">锁定</button></div></div></header>
+    <header class="topbar"><div class="topbar-inner"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span class="brand-text"><span>班级名册</span><span class="app-version" aria-label="应用版本 ${escapeHtml(APP_VERSION)}">v${escapeHtml(APP_VERSION)}</span></span></div><div class="topbar-actions">${renderSaveIndicator()}<button class="button button-secondary button-small" type="button" data-action="logout">锁定</button></div></div></header>
     <main class="workspace">
       <div class="page-heading"><div><h1>${state.activeTab === "roster" ? "学生名册" : "统计概览"}</h1><p>${state.records.length} 名学生</p></div><div class="page-actions">${state.activeTab === "roster" ? `<button class="button button-secondary" type="button" data-action="import">导入 Excel</button><button class="button button-primary" type="button" data-action="new-record">添加学生</button>` : ""}</div></div>
       ${renderMetrics()}
@@ -315,7 +316,21 @@ function renderWorkspace() {
 }
 
 function renderSaveIndicator() {
-  return `<span class="save-indicator ${state.saving ? "is-saving" : ""}" role="status"><i></i>${state.saving ? "保存中…" : state.updatedAt ? `已保存 ${formatTime(state.updatedAt)}` : "已解锁"}</span>`;
+  const label = state.saving ? "保存中…" : state.updatedAt ? "已保存" : "已解锁";
+  let timestamp = "";
+  if (!state.saving && state.updatedAt) {
+    const date = new Date(state.updatedAt);
+    if (Number.isNaN(date.getTime())) {
+      timestamp = '<span class="save-time">时间未知</span>';
+    } else {
+      const formatted = new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+      }).format(date);
+      timestamp = `<time class="save-time" datetime="${date.toISOString()}">${formatted}</time>`;
+    }
+  }
+  return `<span class="save-indicator ${state.saving ? "is-saving" : ""}" role="status" aria-atomic="true"><span class="save-label"><i aria-hidden="true"></i>${label}</span> ${timestamp}</span>`;
 }
 
 function updateSavingControls() {
@@ -409,12 +424,6 @@ function render() {
   composingSearch = false;
   if (state.key) renderWorkspace();
   else renderLogin();
-}
-
-function formatTime(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "已保存";
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
 function base64ToBytes(value) {
