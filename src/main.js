@@ -165,19 +165,23 @@ function renderRecordRow(record, index) {
   </tr>`;
 }
 
-function renderMobileRecord(record) {
-  return `<tr class="mobile-record status-${escapeHtml(record.status || "pending")}" data-id="${escapeHtml(record.id)}">
-    <td><button class="mobile-cell-button mobile-student-name" type="button" data-action="edit" data-id="${escapeHtml(record.id)}" aria-label="查看或编辑${escapeHtml(record.studentName)}的信息">${escapeHtml(record.studentName)}</button></td>
-    <td><button class="mobile-cell-button" type="button" data-action="filter-class" data-value="${escapeHtml(record.className)}" aria-label="筛选班级：${escapeHtml(record.className)}">${escapeHtml(record.className)}</button></td>
-    <td>${record.address ? `<button class="mobile-cell-button mobile-address" type="button" data-action="filter-address" data-value="${escapeHtml(record.address)}" aria-label="筛选同地址学生：${escapeHtml(record.address)}">${escapeHtml(record.address)}</button>` : '<span class="muted">未填写</span>'}</td>
-    <td>${statusSelect(record)}</td>
-  </tr>`;
+function renderMobileRecord(record, index) {
+  return `<li class="mobile-record status-${escapeHtml(record.status || "pending")}" data-id="${escapeHtml(record.id)}">
+    <div class="mobile-record-heading">
+      <div class="mobile-identity"><span class="mobile-serial" aria-label="序号 ${index + 1}">${index + 1}</span><button class="mobile-cell-button mobile-student-name" type="button" data-action="edit" data-id="${escapeHtml(record.id)}" aria-label="查看或编辑${escapeHtml(record.studentName)}的信息">${escapeHtml(record.studentName)}</button></div>
+      <button class="mobile-cell-button mobile-class" type="button" data-action="filter-class" data-value="${escapeHtml(record.className)}" aria-label="筛选班级：${escapeHtml(record.className)}">${escapeHtml(record.className)}</button>
+    </div>
+    ${statusSelect(record)}
+    ${record.address ? `<button class="mobile-cell-button mobile-address" type="button" data-action="filter-address" data-value="${escapeHtml(record.address)}" aria-label="筛选同地址学生：${escapeHtml(record.address)}"><span class="mobile-field-label">地址</span><span>${escapeHtml(record.address)}</span></button>` : '<div class="mobile-address"><span class="mobile-field-label">地址</span><span class="muted">未填写</span></div>'}
+  </li>`;
 }
 
-function renderPager(total) {
+function renderPager(total, page) {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (pages < 2) return "";
-  return `<div class="pager"><span>第 ${state.page + 1} / ${pages} 页</span><div><button class="button button-secondary button-small" type="button" data-action="page" data-page="${state.page - 1}" ${state.page === 0 ? "disabled" : ""}>上一页</button><button class="button button-secondary button-small" type="button" data-action="page" data-page="${state.page + 1}" ${state.page >= pages - 1 ? "disabled" : ""}>下一页</button></div></div>`;
+  const first = page * PAGE_SIZE + 1;
+  const last = Math.min((page + 1) * PAGE_SIZE, total);
+  return `<div class="pager"><span class="pager-info"><span>第 ${first}–${last} 人 / 共 ${total} 人</span><span>第 ${page + 1} / ${pages} 页</span></span><div><button class="button button-secondary button-small" type="button" data-action="page" data-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button><button class="button button-secondary button-small" type="button" data-action="page" data-page="${page + 1}" ${page >= pages - 1 ? "disabled" : ""}>下一页</button></div></div>`;
 }
 
 function renderRosterHeader(column) {
@@ -234,8 +238,10 @@ function renderFilterSummary(total) {
 
 function renderRosterResults(visible) {
   const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-  state.page = Math.max(0, Math.min(state.page, pages - 1));
-  const offset = state.page * PAGE_SIZE;
+  const page = Math.max(0, Math.min(state.page, pages - 1));
+  // 保存中的人数变化只是临时结果，保留原页码以便失败时恢复。
+  if (!state.saving) state.page = page;
+  const offset = page * PAGE_SIZE;
   const pageRows = visible.slice(offset, offset + PAGE_SIZE);
   const tableWidth = ROSTER_COLUMNS.reduce((total, column) => total + state.columnWidths[column.key], 0);
   return visible.length ? `<div class="table-scroll" role="region" aria-label="完整学生信息核对表" tabindex="0"><table class="roster-table" style="--table-width:${tableWidth}px">
@@ -243,8 +249,8 @@ function renderRosterResults(visible) {
       <thead><tr>${ROSTER_COLUMNS.map(renderRosterHeader).join("")}</tr></thead>
       <tbody>${pageRows.map((record, index) => renderRecordRow(record, offset + index)).join("")}</tbody>
     </table></div>
-    <div class="mobile-records"><table class="mobile-roster-table" aria-label="学生列表"><colgroup><col class="mobile-name-col" /><col class="mobile-class-col" /><col /><col class="mobile-status-col" /></colgroup><thead><tr><th scope="col">姓名</th><th scope="col">班级</th><th scope="col">地址</th><th scope="col">状态</th></tr></thead><tbody>${pageRows.map(renderMobileRecord).join("")}</tbody></table></div>
-    ${renderPager(visible.length)}` : `<div class="empty-state"><span class="empty-mark" aria-hidden="true"></span><h2>${state.records.length ? "没有匹配的学生" : "暂无学生"}</h2>${state.records.length ? '<button class="button button-secondary" type="button" data-action="clear-filters">清除筛选</button>' : `<button class="button button-primary" type="button" data-action="new-record">添加学生</button>`}</div>`;
+    <ol class="mobile-records" start="${offset + 1}" role="list" aria-label="学生列表">${pageRows.map((record, index) => renderMobileRecord(record, offset + index)).join("")}</ol>
+    ${renderPager(visible.length, page)}` : `<div class="empty-state"><span class="empty-mark" aria-hidden="true"></span><h2>${state.records.length ? "没有匹配的学生" : "暂无学生"}</h2>${state.records.length ? '<button class="button button-secondary" type="button" data-action="clear-filters">清除筛选</button>' : `<button class="button button-primary" type="button" data-action="new-record">添加学生</button>`}</div>`;
 }
 
 function updateRosterResults() {
