@@ -11,6 +11,7 @@ const json = (body, status = 200) =>
 
 const encoder = new TextEncoder();
 const PASSWORD_ITERATIONS = 100_000;
+const MAX_REQUEST_BYTES = 1_900_000;
 
 function constantTimeEqual(left, right) {
   const a = encoder.encode(left);
@@ -45,7 +46,7 @@ async function readAuthRecord(db) {
 async function readRequestBody(request) {
   const contentType = request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase();
   if (contentType !== "application/json") return { response: json({ error: "invalid_request" }, 415) };
-  if (Number(request.headers.get("Content-Length") || 0) > 1_900_000) {
+  if (Number(request.headers.get("Content-Length") || 0) > MAX_REQUEST_BYTES) {
     return { response: json({ error: "payload_too_large" }, 413) };
   }
   const origin = request.headers.get("Origin");
@@ -53,7 +54,27 @@ async function readRequestBody(request) {
     return { response: json({ error: "invalid_origin" }, 403) };
   }
   try {
-    const body = await request.json();
+    if (!request.body) return { response: json({ error: "invalid_request" }, 400) };
+    const reader = request.body.getReader();
+    const chunks = [];
+    let length = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_REQUEST_BYTES) {
+        await reader.cancel();
+        return { response: json({ error: "payload_too_large" }, 413) };
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const body = JSON.parse(new TextDecoder().decode(bytes));
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       return { response: json({ error: "invalid_request" }, 400) };
     }
@@ -168,14 +189,22 @@ async function handleApi(request, env) {
     try {
       const auth = await authorize(request, env);
       if (auth.response) return auth.response;
-      const { iv, ciphertext } = auth.body;
-      if (typeof iv !== "string" || typeof ciphertext !== "string" || iv.length > 64 || ciphertext.length > 1_800_000) {
+      const { iv, ciphertext, baseUpdatedAt } = auth.body;
+      if (baseUpdatedAt === undefined) return json({ error: "client_update_required" }, 428);
+      if (baseUpdatedAt !== null && (typeof baseUpdatedAt !== "string" || !Number.isFinite(Date.parse(baseUpdatedAt)))) {
         return json({ error: "invalid_payload" }, 400);
       }
-      const updatedAt = new Date().toISOString();
-      await env.DB.prepare("UPDATE roster_vault SET iv = ?, ciphertext = ?, updated_at = ? WHERE id = 1")
-        .bind(iv, ciphertext, updatedAt)
+      if (typeof ciphertext === "string" && ciphertext.length > 1_800_000) return json({ error: "payload_too_large" }, 413);
+      if (typeof iv !== "string" || !/^[A-Za-z0-9+/]{16}$/.test(iv)
+        || typeof ciphertext !== "string" || ciphertext.length < 24 || ciphertext.length % 4 !== 0
+        || !/^[A-Za-z0-9+/]+={0,2}$/.test(ciphertext)) {
+        return json({ error: "invalid_payload" }, 400);
+      }
+      const updatedAt = new Date(Math.max(Date.now(), baseUpdatedAt === null ? 0 : Date.parse(baseUpdatedAt) + 1)).toISOString();
+      const result = await env.DB.prepare("UPDATE roster_vault SET iv = ?, ciphertext = ?, updated_at = ? WHERE id = 1 AND updated_at IS ?")
+        .bind(iv, ciphertext, updatedAt, baseUpdatedAt)
         .run();
+      if (result.meta?.changes !== 1) return json({ error: "vault_conflict" }, 409);
       return json({ updatedAt });
     } catch {
       return json({ error: "database_error" }, 500);

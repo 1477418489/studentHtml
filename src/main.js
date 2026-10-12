@@ -1,10 +1,15 @@
-import * as XLSX from "xlsx";
 import "./styles.css";
 
 const app = document.querySelector("#app");
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const PAGE_SIZE = 40;
+const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
+const MAX_IMPORT_ROWS = 5000;
+const MAX_CIPHERTEXT_LENGTH = 1_800_000;
+let searchTimer;
+let composingSearch = false;
+let importReadId = 0;
 const STATUS = [
   { value: "pending", label: "未签到" },
   { value: "checked", label: "已签到" },
@@ -57,6 +62,7 @@ const state = {
   saving: false,
   authError: "",
   importPreview: null,
+  importReading: false,
   importMode: "merge",
   columnWidths: loadColumnWidths()
 };
@@ -71,7 +77,7 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character
 
 const statusLabel = (value) => STATUS.find((item) => item.value === value)?.label ?? "未签到";
 
-function statusSelect(record, compact = false) {
+function statusSelect(record) {
   return `<select class="status-select status-${escapeHtml(record.status || "pending")}" data-action="status" data-id="${escapeHtml(record.id)}" aria-label="${escapeHtml(record.studentName)}签到状态" ${state.saving ? "disabled" : ""}>
     ${STATUS.map((item) => `<option value="${item.value}" ${record.status === item.value ? "selected" : ""}>${item.label}</option>`).join("")}
   </select>`;
@@ -99,11 +105,12 @@ function renderLogin() {
         ${isSetup ? `<label for="password-confirm">确认访问密码</label>
         <input id="password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" required />` : ""}
         <p class="auth-error" role="alert">${escapeHtml(unavailableMessage)}</p>
-        ${canSubmit ? `<button class="button button-primary auth-submit" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? (isSetup ? "正在创建…" : "正在解锁…") : isSetup ? "创建密码并进入" : "进入名册"}</button>` : ""}
+        ${canSubmit ? `<button class="button button-primary auth-submit" type="submit" ${state.saving ? "disabled" : ""}>${state.saving ? (isSetup ? "正在创建…" : "正在解锁…") : isSetup ? "创建密码并进入" : "进入名册"}</button>` : state.authMode === "unavailable" ? '<button class="button button-primary" type="button" id="retry-auth">重新连接</button>' : ""}
       </form>
     </section>
   </main>`;
   if (canSubmit) document.querySelector("#unlock-form")?.addEventListener("submit", handleUnlock);
+  document.querySelector("#retry-auth")?.addEventListener("click", initializeAuth);
 }
 
 function summarize(records) {
@@ -157,11 +164,12 @@ function renderMobileRecord(record, index) {
   return `<article class="mobile-record status-${escapeHtml(record.status || "pending")}">
     <div class="mobile-record-head">
       <div class="mobile-record-identity"><span class="mobile-serial">${index + 1}</span><h3>${escapeHtml(record.studentName)}</h3></div>
-      <div class="mobile-record-actions">${statusSelect(record, true)}<button class="text-button" type="button" data-action="edit" data-id="${escapeHtml(record.id)}">编辑</button></div>
+      <div class="mobile-record-actions">${statusSelect(record)}<button class="text-button" type="button" data-action="edit" data-id="${escapeHtml(record.id)}" aria-label="编辑${escapeHtml(record.studentName)}">编辑</button></div>
     </div>
     <div class="mobile-fields">
       <div class="mobile-class-field"><span>班级</span><strong>${escapeHtml(record.className) || "—"}</strong></div>
-      <div class="mobile-address"><span>地址</span><strong title="${escapeHtml(record.address)}">${escapeHtml(record.address) || "—"}</strong></div>
+      ${record.parentName || record.phone ? `<div class="mobile-contact"><span>家长</span><strong>${escapeHtml(record.parentName) || "—"}</strong>${record.phone ? `<a class="phone-link" href="tel:${encodeURIComponent(record.phone)}" aria-label="拨打家长电话 ${escapeHtml(record.phone)}">${escapeHtml(record.phone)}</a>` : ""}</div>` : ""}
+      ${record.address ? `<details class="mobile-address"><summary><span>地址</span><strong>${escapeHtml(record.address)}</strong></summary><p>${escapeHtml(record.address)}</p></details>` : '<div><span>地址</span><strong>—</strong></div>'}
     </div>
   </article>`;
 }
@@ -188,33 +196,52 @@ function renderRosterHeader(column) {
 }
 
 function renderRoster() {
+  const classOptions = renderClassOptions();
   const visible = getVisibleRecords();
-  const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-  if (state.page >= pages) state.page = pages - 1;
-  const pageRows = visible.slice(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE);
-  const classes = [...new Set(state.records.map((record) => record.className).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
-  const offset = state.page * PAGE_SIZE;
-  const tableWidth = ROSTER_COLUMNS.reduce((total, column) => total + state.columnWidths[column.key], 0);
   const mobileSortValue = `${state.sortKey}:${state.sortDirection}`;
   const resettableCount = state.records.filter((record) => (record.status || "pending") !== "pending").length;
   return `<section class="roster-view">
     <div class="roster-toolbar">
-      <div class="search-wrap"><input type="search" name="search" value="${escapeHtml(state.search)}" placeholder="搜索姓名、班级、电话或地址" aria-label="搜索名册" /></div>
-      <label class="filter-control"><span>班级</span><select name="classFilter"><option value="">全部</option>${classes.map((name) => `<option value="${escapeHtml(name)}" ${state.classFilter === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>
+      <div class="search-wrap"><input type="search" name="search" value="${escapeHtml(state.search)}" placeholder="搜索姓名、班级、电话或地址" aria-label="搜索名册" autocomplete="off" enterkeyhint="search" /></div>
+      <label class="filter-control"><span>班级</span><select name="classFilter">${classOptions}</select></label>
       <label class="filter-control"><span>状态</span><select name="statusFilter"><option value="">全部</option>${STATUS.map((item) => `<option value="${item.value}" ${state.statusFilter === item.value ? "selected" : ""}>${item.label}</option>`).join("")}</select></label>
       <label class="filter-control mobile-sort-control"><span>排序</span><select name="mobileSort" aria-label="按班级或地址排序"><option value="className:1" ${mobileSortValue === "className:1" ? "selected" : ""}>班级升序</option><option value="className:-1" ${mobileSortValue === "className:-1" ? "selected" : ""}>班级降序</option><option value="address:1" ${mobileSortValue === "address:1" ? "selected" : ""}>地址升序</option><option value="address:-1" ${mobileSortValue === "address:-1" ? "selected" : ""}>地址降序</option></select></label>
       <button class="button button-secondary button-small reset-status-button" type="button" data-action="reset-status" title="重置全体学生的签到状态" ${!resettableCount || state.saving ? "disabled" : ""}>重置签到状态</button>
-      <span class="result-count">${visible.length} 条记录</span>
+      <span class="result-count" role="status">${visible.length} 条记录</span>
     </div>
-    ${visible.length ? `<div class="table-scroll"><table class="roster-table" style="--table-width:${tableWidth}px">
+    <div id="roster-results">${renderRosterResults(visible)}</div>
+  </section>`;
+}
+
+function renderClassOptions() {
+  const classes = [...new Set(state.records.map((record) => record.className).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+  if (state.classFilter && !classes.includes(state.classFilter)) state.classFilter = "";
+  return `<option value="">全部</option>${classes.map((name) => `<option value="${escapeHtml(name)}" ${state.classFilter === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}`;
+}
+
+function renderRosterResults(visible) {
+  const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  state.page = Math.max(0, Math.min(state.page, pages - 1));
+  const offset = state.page * PAGE_SIZE;
+  const pageRows = visible.slice(offset, offset + PAGE_SIZE);
+  const tableWidth = ROSTER_COLUMNS.reduce((total, column) => total + state.columnWidths[column.key], 0);
+  return visible.length ? `<div class="table-scroll"><table class="roster-table" style="--table-width:${tableWidth}px">
       <colgroup>${ROSTER_COLUMNS.map((column) => `<col data-column="${column.key}" style="width:${state.columnWidths[column.key]}px" />`).join("")}</colgroup>
       <thead><tr>${ROSTER_COLUMNS.map(renderRosterHeader).join("")}</tr></thead>
       <tbody>${pageRows.map((record, index) => renderRecordRow(record, offset + index)).join("")}</tbody>
     </table></div>
     <div class="mobile-records">${pageRows.map((record, index) => renderMobileRecord(record, offset + index)).join("")}</div>
-    ${renderPager(visible.length)}` : `<div class="empty-state"><span class="empty-mark" aria-hidden="true"></span><h2>${state.records.length ? "没有匹配的学生" : "暂无学生"}</h2>${state.records.length ? "" : `<button class="button button-primary" type="button" data-action="new-record">添加学生</button>`}</div>`}
-  </section>`;
+    ${renderPager(visible.length)}` : `<div class="empty-state"><span class="empty-mark" aria-hidden="true"></span><h2>${state.records.length ? "没有匹配的学生" : "暂无学生"}</h2>${state.records.length ? '<button class="button button-secondary" type="button" data-action="clear-filters">清除筛选</button>' : `<button class="button button-primary" type="button" data-action="new-record">添加学生</button>`}</div>`;
+}
+
+function updateRosterResults() {
+  const output = document.querySelector("#roster-results");
+  if (!output) return;
+  const visible = getVisibleRecords();
+  document.querySelector(".result-count").textContent = `${visible.length} 条记录`;
+  output.innerHTML = renderRosterResults(visible);
+  bindRosterColumnResizeEvents();
 }
 
 function groupRecords(key) {
@@ -263,7 +290,7 @@ function renderStatistics() {
 
 function renderWorkspace() {
   app.innerHTML = `<div class="app-shell">
-    <header class="topbar"><div class="topbar-inner"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>班级名册</span></div><div class="topbar-actions"><span class="save-indicator ${state.saving ? "is-saving" : ""}"><i></i>${state.saving ? "保存中" : state.updatedAt ? `已保存 ${formatTime(state.updatedAt)}` : "已解锁"}</span><button class="button button-secondary button-small" type="button" data-action="logout">锁定</button></div></div></header>
+    <header class="topbar"><div class="topbar-inner"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>班级名册</span></div><div class="topbar-actions">${renderSaveIndicator()}<button class="button button-secondary button-small" type="button" data-action="logout">锁定</button></div></div></header>
     <main class="workspace">
       <div class="page-heading"><div><h1>${state.activeTab === "roster" ? "学生名册" : "统计概览"}</h1><p>${state.records.length} 名学生</p></div><div class="page-actions">${state.activeTab === "roster" ? `<button class="button button-secondary" type="button" data-action="import">导入 Excel</button><button class="button button-primary" type="button" data-action="new-record">添加学生</button>` : ""}</div></div>
       ${renderMetrics()}
@@ -271,10 +298,48 @@ function renderWorkspace() {
       ${state.activeTab === "roster" ? renderRoster() : renderStatistics()}
     </main>
   </div>
-  <dialog id="record-dialog" class="dialog"></dialog>
-  <dialog id="import-dialog" class="dialog import-dialog"><form method="dialog" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">名册数据</span><h2>导入 Excel</h2></div><button class="close-button" value="cancel" aria-label="关闭" formnovalidate>×</button></div><label class="file-picker"><span>选择文件</span><input id="import-file" type="file" accept=".xlsx,.xls,.csv" /></label><fieldset class="import-mode"><legend>导入方式</legend><label class="import-mode-option"><input type="radio" name="importMode" value="merge" checked /><span><strong>更新并追加</strong><small>按学生姓名和班级匹配，更新已有记录并新增未匹配记录</small></span></label><label class="import-mode-option import-mode-danger"><input type="radio" name="importMode" value="replace" /><span><strong>清空全部后导入</strong><small>先删除当前名册，再导入文件中的记录</small></span></label></fieldset><div id="import-preview" class="import-preview"></div><div class="dialog-actions"><button class="button button-secondary" value="cancel">取消</button><button class="button button-primary" type="button" data-action="confirm-import" disabled>导入</button></div></form></dialog>`;
+  <dialog id="record-dialog" class="dialog" aria-labelledby="record-dialog-title"></dialog>
+  <dialog id="import-dialog" class="dialog import-dialog" aria-labelledby="import-dialog-title"><form method="dialog" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">名册数据</span><h2 id="import-dialog-title">导入 Excel</h2></div><button class="close-button" value="cancel" aria-label="关闭" formnovalidate>×</button></div><label class="file-picker"><span>选择文件</span><input id="import-file" type="file" accept=".xlsx,.xls,.csv" /></label><fieldset class="import-mode"><legend>导入方式</legend><label class="import-mode-option"><input type="radio" name="importMode" value="merge" checked /><span><strong>更新并追加</strong><small>按学生姓名和班级匹配，更新已有记录并新增未匹配记录</small></span></label><label class="import-mode-option import-mode-danger"><input type="radio" name="importMode" value="replace" /><span><strong>清空全部后导入</strong><small>先删除当前名册，再导入文件中的记录</small></span></label></fieldset><div id="import-preview" class="import-preview" role="status"></div><div class="dialog-actions"><button class="button button-secondary" value="cancel">取消</button><button class="button button-primary" type="button" data-action="confirm-import" disabled>导入</button></div></form></dialog>`;
   bindWorkspaceEvents();
   bindRosterColumnResizeEvents();
+  updateSavingControls();
+  document.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("cancel", (event) => {
+      if (state.saving) event.preventDefault();
+    });
+  });
+  document.querySelector("#import-dialog").addEventListener("close", () => {
+    importReadId += 1;
+    state.importReading = false;
+  });
+}
+
+function renderSaveIndicator() {
+  return `<span class="save-indicator ${state.saving ? "is-saving" : ""}" role="status"><i></i>${state.saving ? "保存中…" : state.updatedAt ? `已保存 ${formatTime(state.updatedAt)}` : "已解锁"}</span>`;
+}
+
+function updateSavingControls() {
+  const actions = ["new-record", "edit", "delete", "import", "logout", "tab", "dimension"];
+  const selectors = actions.map((action) => `[data-action="${action}"]`);
+  selectors.push(".status-select", "dialog input", "dialog select", "dialog button");
+  document.querySelectorAll(selectors.join(",")).forEach((control) => { control.disabled = state.saving; });
+  const reset = document.querySelector('[data-action="reset-status"]');
+  if (reset) reset.disabled = state.saving || !state.records.some((record) => record.status !== "pending");
+  renderImportPreview();
+}
+
+function refreshWorkspaceData() {
+  document.querySelector(".save-indicator").outerHTML = renderSaveIndicator();
+  document.querySelector(".metrics").outerHTML = renderMetrics();
+  document.querySelector(".page-heading p").textContent = `${state.records.length} 名学生`;
+  if (state.activeTab === "roster") {
+    document.querySelector('[name="classFilter"]').innerHTML = renderClassOptions();
+    document.querySelector('[name="statusFilter"]').value = state.statusFilter;
+    updateRosterResults();
+  } else {
+    document.querySelector(".statistics-view").outerHTML = renderStatistics();
+  }
+  updateSavingControls();
 }
 
 function setRosterColumnWidth(table, handle, column, width) {
@@ -340,6 +405,8 @@ function bindRosterColumnResizeEvents() {
 }
 
 function render() {
+  clearTimeout(searchTimer);
+  composingSearch = false;
   if (state.key) renderWorkspace();
   else renderLogin();
 }
@@ -376,19 +443,30 @@ async function deriveKey(password, salt) {
 }
 
 async function requestJson(path, method, body) {
-  const response = await fetch(path, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify(body)
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(result.error || "request_failed");
-    error.status = response.status;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      signal: controller.signal,
+      body: JSON.stringify(body)
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      const error = new Error(result.error || "request_failed");
+      error.status = response.status;
+      throw error;
+    }
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("request_timeout");
+    if (error instanceof TypeError) throw new Error("network_error");
     throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return result;
 }
 
 function errorMessage(error) {
@@ -398,11 +476,25 @@ function errorMessage(error) {
   if (error.message === "legacy_password_required") return "此名册已有加密数据，需要恢复原访问密码";
   if (error.message === "password_not_configured") return "访问密码尚未配置，请检查部署设置";
   if (error.message === "database_not_configured" || error.message === "database_error") return "数据服务暂不可用，请检查 D1 配置";
-  if (error.message === "Failed to fetch") return "无法连接数据服务，请检查网络或部署配置";
-  return "数据无法解密，密码或名册数据不匹配";
+  if (error.message === "network_error") return "无法连接数据服务，请检查网络后重试";
+  if (error.message === "request_timeout") return "请求超时，尚未确认保存结果。请恢复网络后锁定并重新进入，确认最新数据";
+  if (error.message === "vault_conflict") return "其他页面或设备已更新名册，本次修改未保存。请保留当前输入，锁定后重新进入再修改";
+  if (error.message === "client_update_required") return "页面版本已过期，请保留当前输入并刷新页面后重试";
+  if (error.message === "payload_too_large") return "名册数据超过保存上限，请减少记录或缩短过长内容后重试";
+  if (error.message === "invalid_vault" || error.name === "OperationError") return "数据无法解密，密码或名册数据不匹配";
+  return "请求失败，请稍后重试";
 }
 
 async function initializeAuth() {
+  state.authMode = "loading";
+  state.authError = "";
+  renderLogin();
+  if (!window.isSecureContext || !crypto.subtle) {
+    state.authMode = "unavailable";
+    state.authError = "当前地址不支持安全加密，请通过 HTTPS 或本机 localhost 打开";
+    renderLogin();
+    return;
+  }
   try {
     const status = await requestJson("/api/status", "GET");
     state.authMode = ["login", "setup"].includes(status.mode) ? status.mode : "unavailable";
@@ -416,6 +508,7 @@ async function initializeAuth() {
 
 async function handleUnlock(event) {
   event.preventDefault();
+  if (state.saving) return;
   const form = event.currentTarget;
   const formData = new FormData(form);
   const password = String(formData.get("password") || "");
@@ -484,10 +577,13 @@ async function persistRecords() {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const payload = encoder.encode(JSON.stringify({ version: 1, records: state.records, updatedAt: new Date().toISOString() }));
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, state.key, payload);
+  const encodedCiphertext = bytesToBase64(ciphertext);
+  if (encodedCiphertext.length > MAX_CIPHERTEXT_LENGTH) throw new Error("payload_too_large");
   const result = await requestJson("/api/vault", "PUT", {
     password: state.password,
+    baseUpdatedAt: state.updatedAt || null,
     iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(ciphertext)
+    ciphertext: encodedCiphertext
   });
   state.updatedAt = result.updatedAt;
 }
@@ -495,7 +591,7 @@ async function persistRecords() {
 async function saveWithSnapshot(previousRecords) {
   if (state.saving) return false;
   state.saving = true;
-  render();
+  refreshWorkspaceData();
   try {
     await persistRecords();
     return true;
@@ -505,7 +601,7 @@ async function saveWithSnapshot(previousRecords) {
     return false;
   } finally {
     state.saving = false;
-    render();
+    refreshWorkspaceData();
   }
 }
 
@@ -514,6 +610,7 @@ function bindWorkspaceEvents() {
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const { action } = button.dataset;
+    if (state.saving && ["new-record", "edit", "delete", "reset-status", "import", "confirm-import", "logout", "tab", "dimension"].includes(action)) return;
     if (action === "tab") {
       state.activeTab = button.dataset.tab;
       render();
@@ -531,6 +628,13 @@ function bindWorkspaceEvents() {
       render();
     } else if (action === "page") {
       state.page = Number(button.dataset.page);
+      render();
+      document.querySelector(".roster-toolbar")?.scrollIntoView({ block: "start" });
+    } else if (action === "clear-filters") {
+      state.search = "";
+      state.classFilter = "";
+      state.statusFilter = "";
+      state.page = 0;
       render();
     } else if (action === "new-record") {
       openRecordDialog();
@@ -576,14 +680,19 @@ function bindWorkspaceEvents() {
   };
 
   app.oninput = (event) => {
+    if (event.target.matches('#record-form input[required]')) event.target.setCustomValidity("");
+    if (!event.target.matches("[name=search]") || event.isComposing || composingSearch) return;
+    scheduleSearch(event.target.value);
+  };
+  app.oncompositionstart = (event) => {
     if (!event.target.matches("[name=search]")) return;
-    const position = event.target.selectionStart;
-    state.search = event.target.value;
-    state.page = 0;
-    render();
-    const input = document.querySelector("[name=search]");
-    input?.focus();
-    input?.setSelectionRange(position, position);
+    composingSearch = true;
+    clearTimeout(searchTimer);
+  };
+  app.oncompositionend = (event) => {
+    if (!event.target.matches("[name=search]")) return;
+    composingSearch = false;
+    scheduleSearch(event.target.value);
   };
 
   app.onsubmit = async (event) => {
@@ -591,6 +700,17 @@ function bindWorkspaceEvents() {
     event.preventDefault();
     await submitRecordForm(event.target);
   };
+}
+
+function scheduleSearch(value) {
+  state.search = value;
+  state.page = 0;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    if (!state.key || state.activeTab !== "roster") return;
+    updateRosterResults();
+    updateSavingControls();
+  }, 150);
 }
 
 async function updateStatus(id, status) {
@@ -619,18 +739,20 @@ async function resetAttendanceStatuses() {
 }
 
 async function deleteRecord(id) {
+  if (state.saving) return;
   const record = state.records.find((item) => item.id === id);
   if (!record || !window.confirm(`删除“${record.studentName}”的名册记录？`)) return;
   const previous = structuredClone(state.records);
   state.records = state.records.filter((item) => item.id !== id);
-  await saveWithSnapshot(previous);
+  if (await saveWithSnapshot(previous)) document.querySelector("#record-dialog")?.close();
 }
 
 function openRecordDialog(record) {
+  if (state.saving) return;
   const editing = Boolean(record);
   const current = record || { studentName: "", className: "", parentName: "", phone: "", address: "", status: "pending" };
   const dialog = document.querySelector("#record-dialog");
-  dialog.innerHTML = `<form id="record-form" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">${editing ? "编辑记录" : "新建记录"}</span><h2>${editing ? "学生信息" : "添加学生"}</h2></div><button class="close-button" type="button" data-action="close-record" aria-label="关闭">×</button></div>
+  dialog.innerHTML = `<form id="record-form" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">${editing ? "编辑记录" : "新建记录"}</span><h2 id="record-dialog-title" tabindex="-1">${editing ? "学生信息" : "添加学生"}</h2></div><button class="close-button" type="button" data-action="close-record" aria-label="关闭">×</button></div>
     <div class="form-grid">
       <label>学生姓名<input name="studentName" required maxlength="80" value="${escapeHtml(current.studentName)}" /></label>
       <label>班级<input name="className" required maxlength="80" value="${escapeHtml(current.className)}" /></label>
@@ -638,26 +760,34 @@ function openRecordDialog(record) {
       <label>家长电话<input name="phone" type="tel" maxlength="40" value="${escapeHtml(current.phone)}" /></label>
       <label class="form-wide">地址<input name="address" maxlength="300" value="${escapeHtml(current.address)}" /></label>
       <label>签到状态<select name="status">${STATUS.map((item) => `<option value="${item.value}" ${current.status === item.value ? "selected" : ""}>${item.label}</option>`).join("")}</select></label>
-    </div><div class="dialog-actions"><button class="button button-secondary" type="button" data-action="close-record">取消</button><button class="button button-primary" type="submit" ${state.saving ? "disabled" : ""}>保存</button></div></form>`;
+    </div><div class="dialog-actions">${editing ? `<button class="button button-danger delete-record-button" type="button" data-action="delete" data-id="${escapeHtml(record.id)}">删除</button>` : ""}<button class="button button-secondary" type="button" data-action="close-record">取消</button><button class="button button-primary" type="submit" ${state.saving ? "disabled" : ""}>保存</button></div></form>`;
   dialog.querySelectorAll('[data-action="close-record"]').forEach((button) => button.addEventListener("click", () => dialog.close()));
   dialog.querySelector("form").dataset.id = record?.id || "";
   dialog.showModal();
-  dialog.querySelector("[name=studentName]")?.focus();
+  dialog.querySelector(matchMedia("(pointer: coarse)").matches ? "#record-dialog-title" : "[name=studentName]")?.focus({ preventScroll: true });
 }
 
 async function submitRecordForm(form) {
   if (state.saving) return;
   const previous = structuredClone(state.records);
-  const values = Object.fromEntries(new FormData(form).entries());
+  const values = Object.fromEntries([...new FormData(form).entries()].map(([key, value]) => [key, String(value).trim()]));
+  for (const name of ["studentName", "className"]) {
+    if (values[name]) continue;
+    form.elements[name].setCustomValidity("请填写有效内容，不能只输入空格");
+    form.elements[name].reportValidity();
+    return;
+  }
   const id = form.dataset.id;
   const normalized = normalizeRecord({ ...values, id: id || crypto.randomUUID(), updatedAt: new Date().toISOString() });
   if (id) state.records = state.records.map((record) => record.id === id ? normalized : record);
   else state.records = [...state.records, normalized];
-  document.querySelector("#record-dialog")?.close();
-  await saveWithSnapshot(previous);
+  if (await saveWithSnapshot(previous)) document.querySelector("#record-dialog")?.close();
 }
 
 function openImportDialog() {
+  if (state.saving) return;
+  importReadId += 1;
+  state.importReading = false;
   state.importPreview = null;
   state.importMode = "merge";
   const dialog = document.querySelector("#import-dialog");
@@ -715,10 +845,20 @@ function countImportChanges(imported) {
 }
 
 async function readImportFile(file) {
+  const readId = ++importReadId;
+  state.importPreview = null;
+  state.importReading = Boolean(file);
+  renderImportPreview();
   if (!file) return;
   try {
-    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false });
+    if (file.size > MAX_IMPORT_BYTES) throw new Error("file_too_large");
+    const [XLSX, buffer] = await Promise.all([import("xlsx"), file.arrayBuffer()]);
+    if (readId !== importReadId) return;
+    const workbook = XLSX.read(buffer, { type: "array", cellDates: false, sheets: 0, sheetRows: MAX_IMPORT_ROWS + 2 });
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+    if (!firstSheet) throw new Error("empty_file");
+    const range = XLSX.utils.decode_range(firstSheet["!fullref"] || firstSheet["!ref"] || "A1");
+    if (range.e.r > MAX_IMPORT_ROWS) throw new Error("too_many_rows");
     const rows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: false, defval: "", blankrows: false });
     if (!rows.length) throw new Error("empty_file");
     const columns = findImportColumns(rows[0]);
@@ -748,16 +888,27 @@ async function readImportFile(file) {
         providedFields
       });
     }
-    state.importPreview = { fileName: file.name, imported, skipped, error: imported.length ? "" : "no_records" };
+    state.importPreview = { fileName: file.name, imported, skipped, error: imported.length ? "" : "没有有效记录，请检查学生姓名和班级" };
   } catch (error) {
+    if (readId !== importReadId) return;
+    const messages = {
+      missing_columns: "未识别到学生姓名或班级列",
+      empty_file: "文件中没有数据",
+      file_too_large: "文件超过 10 MB，请拆分后再导入",
+      too_many_rows: "首个工作表超过 5001 行（含表头和空行），请拆分后再导入"
+    };
     state.importPreview = {
       fileName: file.name,
       imported: [],
       skipped: 0,
-      error: error.message === "missing_columns" ? "未识别到学生姓名或班级列" : error.message === "empty_file" ? "文件中没有数据" : "文件读取失败"
+      error: messages[error.message] || "文件读取失败，请检查文件格式和网络后重试"
     };
+  } finally {
+    if (readId === importReadId) {
+      state.importReading = false;
+      renderImportPreview();
+    }
   }
-  renderImportPreview();
 }
 
 function renderImportPreview() {
@@ -765,6 +916,12 @@ function renderImportPreview() {
   const output = document.querySelector("#import-preview");
   const button = document.querySelector('[data-action="confirm-import"]');
   if (!output || !button) return;
+  if (state.importReading) {
+    output.textContent = "正在读取文件…";
+    button.disabled = true;
+    button.textContent = "正在读取…";
+    return;
+  }
   if (!preview) {
     output.innerHTML = "";
     button.disabled = true;
@@ -815,11 +972,13 @@ async function confirmImport() {
   }
   state.records = nextRecords;
   state.page = 0;
-  document.querySelector("#import-dialog")?.close();
-  await saveWithSnapshot(previous);
+  if (await saveWithSnapshot(previous)) document.querySelector("#import-dialog")?.close();
 }
 
 async function lockApp() {
+  if (state.saving) return;
+  clearTimeout(searchTimer);
+  importReadId += 1;
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
   state.password = "";
   state.key = null;
@@ -832,8 +991,16 @@ async function lockApp() {
   state.page = 0;
   state.activeTab = "roster";
   state.authError = "";
+  state.importPreview = null;
+  state.importReading = false;
   render();
 }
+
+window.addEventListener("beforeunload", (event) => {
+  if (!state.saving || !state.key) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 render();
 initializeAuth();
