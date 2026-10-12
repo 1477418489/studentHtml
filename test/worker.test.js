@@ -50,7 +50,7 @@ async function setup(env) {
 }
 
 function save(env, baseUpdatedAt, value = ciphertext) {
-  return api(env, "/api/vault", "PUT", { password, baseUpdatedAt, iv, ciphertext: value });
+  return api(env, "/api/vault", "PUT", { password, baseUpdatedAt, supportsJourney: true, iv, ciphertext: value });
 }
 
 test("首次设置、密码校验和加密名册往返", async (t) => {
@@ -71,14 +71,17 @@ test("首次设置、密码校验和加密名册往返", async (t) => {
   const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
   const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: Buffer.from(vault.salt, "base64"), iterations: 600_000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
   const records = [{ studentName: "测试学生", className: "一班", status: "checked" }];
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: Buffer.from(iv, "base64") }, key, encoder.encode(JSON.stringify({ version: 1, records })));
+  const journey = { stations: [{ id: "school", name: "学校南门" }, { id: "east", name: "幸福里东门" }], stopIds: ["school", "east"], currentStopId: "east", completed: false };
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: Buffer.from(iv, "base64") }, key, encoder.encode(JSON.stringify({ version: 1, records, journey })));
   const saved = await save(env, null, Buffer.from(encrypted).toString("base64"));
   assert.equal(saved.status, 200);
   const loaded = await api(env, "/api/unlock", "POST", { password });
   assert.equal(loaded.body.updatedAt, saved.body.updatedAt);
   assert.equal(loaded.body.salt, vault.salt);
   const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: Buffer.from(loaded.body.iv, "base64") }, key, Buffer.from(loaded.body.ciphertext, "base64"));
-  assert.deepEqual(JSON.parse(new TextDecoder().decode(plaintext)).records, records);
+  const payload = JSON.parse(new TextDecoder().decode(plaintext));
+  assert.deepEqual(payload.records, records);
+  assert.deepEqual(payload.journey, journey);
   assert.equal(loaded.headers.get("Cache-Control"), "no-store");
 });
 
@@ -109,8 +112,15 @@ test("过期客户端和无效密文不能覆盖已有名册", async (t) => {
   const legacy = await api(env, "/api/vault", "PUT", { password, iv, ciphertext });
   assert.equal(legacy.status, 428);
   assert.equal(legacy.body.error, "client_update_required");
+  for (const supportsJourney of [undefined, false, "true"]) {
+    const oldPage = await api(env, "/api/vault", "PUT", { password, baseUpdatedAt: saved.body.updatedAt, iv, ciphertext, supportsJourney });
+    assert.equal(oldPage.status, 428);
+    assert.equal(oldPage.body.error, "client_update_required");
+  }
+  const missingVersion = await api(env, "/api/vault", "PUT", { password, supportsJourney: true, iv, ciphertext });
+  assert.equal(missingVersion.status, 428);
   for (const patch of [{ iv: "" }, { ciphertext: "" }, { iv: "invalid" }, { ciphertext: "!".repeat(24) }, { baseUpdatedAt: "invalid" }]) {
-    const result = await api(env, "/api/vault", "PUT", { password, baseUpdatedAt: saved.body.updatedAt, iv, ciphertext, ...patch });
+    const result = await api(env, "/api/vault", "PUT", { password, baseUpdatedAt: saved.body.updatedAt, supportsJourney: true, iv, ciphertext, ...patch });
     assert.equal(result.status, 400);
   }
   const oversized = await save(env, saved.body.updatedAt, "A".repeat(1_800_004));

@@ -1,5 +1,6 @@
 import "./styles.css";
 import { version as APP_VERSION } from "../package.json";
+import { MAX_STATION_NAME_LENGTH, configureJourney, emptyJourney, journeyProgress, normalizeJourney, sameStopOrder } from "./journey.js";
 
 const app = document.querySelector("#app");
 const encoder = new TextEncoder();
@@ -8,6 +9,7 @@ const PAGE_SIZE = 40;
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 const MAX_IMPORT_ROWS = 5000;
 const MAX_CIPHERTEXT_LENGTH = 1_800_000;
+const compactJourneyMedia = matchMedia("(max-height: 500px)");
 let searchTimer;
 let composingSearch = false;
 let importReadId = 0;
@@ -51,6 +53,12 @@ const state = {
   key: null,
   salt: "",
   records: [],
+  journey: emptyJourney(),
+  journeyExpanded: null,
+  journeyDraft: null,
+  journeyDialogTab: "route",
+  journeyResetDraft: false,
+  stationNamesInput: "",
   updatedAt: "",
   activeTab: "roster",
   dimension: "className",
@@ -314,6 +322,201 @@ function renderStatistics() {
   </section>`;
 }
 
+function renderJourneyPanel() {
+  const journey = state.journey;
+  const expanded = state.journeyExpanded ?? !compactJourneyMedia.matches;
+  const { currentIndex, passedCount, nextStopId } = journeyProgress(journey);
+  const stations = new Map(journey.stations.map((station) => [station.id, station.name]));
+  const total = journey.stopIds.length;
+  const progress = journey.completed ? `已结束 · ${total} 站` : currentIndex >= 0 ? `当前 ${currentIndex + 1} / ${total} 站` : total ? `未出发 · ${total} 站` : "尚未设置本趟";
+  const description = journey.completed ? `本趟已结束，${total} 站全部已过站` : currentIndex >= 0 ? `当前：${stations.get(journey.currentStopId)}；已过 ${passedCount} 站` : total ? `首站：${stations.get(journey.stopIds[0])}` : "";
+  const nextLabel = journey.completed ? "再跑一趟" : nextStopId ? (currentIndex < 0 ? "到达首站" : "下一站") : "结束本趟";
+  return `<section id="journey-panel" class="journey-panel${total && !expanded ? " is-collapsed" : ""}" aria-label="接送站点">
+    <div class="journey-topline"><div class="journey-heading"><h2>接送站点</h2><span class="journey-progress" role="status" aria-label="${escapeHtml(description || progress)}">${progress}</span></div>
+      <div class="journey-actions">${total ? `<button class="button button-secondary button-small" type="button" data-action="next-stop" aria-label="${escapeHtml(nextStopId ? `${nextLabel}：${stations.get(nextStopId)}` : nextLabel)}" ${state.saving ? "disabled" : ""}>${nextLabel}</button><button class="text-button" type="button" data-action="toggle-journey" aria-expanded="${expanded}" aria-controls="journey-sequence">${expanded ? "收起" : "展开"}</button>` : ""}<button class="text-button" type="button" data-action="manage-journey" ${state.saving ? "disabled" : ""}>${total ? "设置" : "设置站点"}</button></div>
+    </div>
+    ${total ? `<p class="journey-current" ${expanded ? "hidden" : ""}>${escapeHtml(description)}</p>
+    <div id="journey-sequence" class="journey-sequence" ${expanded ? "" : "hidden"} role="region" aria-label="本趟站点，横向滑动查看，点选设为当前到达站点" tabindex="0"><ol class="journey-stops" role="list">${journey.stopIds.map((id, index) => {
+      const status = journey.completed || index < currentIndex ? "passed" : index === currentIndex ? "current" : "upcoming";
+      const label = { passed: "已过站", current: "当前站", upcoming: "待到站" }[status];
+      return `<li class="journey-stop is-${status}"><button type="button" class="journey-stop-button" data-action="arrive-stop" data-id="${escapeHtml(id)}" ${status === "current" ? 'aria-current="step"' : ""} aria-label="第 ${index + 1} 站，${escapeHtml(stations.get(id))}，${label}，点选到达" ${state.saving ? "disabled" : ""}><span class="journey-stop-number" aria-hidden="true">${index + 1}</span><span class="journey-stop-name">${escapeHtml(stations.get(id))}</span><span class="journey-stop-status">${label}</span></button></li>`;
+    }).join("")}</ol></div>` : ""}
+  </section>`;
+}
+
+function refreshJourneyPanel(scrollToCurrent = false) {
+  const panel = document.querySelector("#journey-panel");
+  if (!panel) return;
+  const scrollLeft = panel.querySelector(".journey-sequence")?.scrollLeft || 0;
+  panel.outerHTML = renderJourneyPanel();
+  const sequence = document.querySelector(".journey-sequence");
+  if (sequence) sequence.scrollLeft = scrollLeft;
+  if (scrollToCurrent) revealCurrentStop();
+}
+
+function revealCurrentStop() {
+  const sequence = document.querySelector(".journey-sequence");
+  if (!sequence || sequence.hidden) return;
+  const stop = sequence.querySelector('[aria-current="step"]') || (state.journey.completed ? sequence.querySelector("li:last-child button") : sequence.querySelector("button"));
+  if (!stop) return;
+  const container = sequence.getBoundingClientRect();
+  const target = stop.getBoundingClientRect();
+  sequence.scrollLeft += target.left - container.left - (container.width - target.width) / 2;
+}
+
+function renderJourneyDialog() {
+  const draft = state.journeyDraft;
+  if (!draft) return;
+  const dialog = document.querySelector("#journey-dialog");
+  const names = new Map(draft.stations.map((station) => [station.id, station.name]));
+  const remaining = draft.stations.filter((station) => !draft.stopIds.includes(station.id));
+  const routeChanged = !sameStopOrder(state.journey.stopIds, draft.stopIds);
+  const resetsProgress = (routeChanged || state.journeyResetDraft) && (state.journey.currentStopId !== null || state.journey.completed);
+  const routeTab = state.journeyDialogTab === "route";
+  dialog.innerHTML = `<form id="journey-form" class="dialog-form" novalidate>
+    <div class="dialog-heading"><div><span class="dialog-kicker">接送站点</span><h2 id="journey-dialog-title" tabindex="-1">站点与本趟线路</h2></div><button class="close-button" type="button" data-action="close-journey" aria-label="关闭站点设置">×</button></div>
+    <div class="journey-editor-tabs" role="group" aria-label="站点设置内容"><button type="button" data-action="journey-editor-tab" data-tab="route" aria-pressed="${routeTab}">本趟线路（${draft.stopIds.length}）</button><button type="button" data-action="journey-editor-tab" data-tab="stations" aria-pressed="${!routeTab}">站点清单（${draft.stations.length}）</button></div>
+    ${routeTab ? `<div class="journey-editor-heading"><p class="journey-help">按运行顺序排列，用上移、下移调整。</p><div><button class="text-button" type="button" data-action="add-all-stops" data-idle-disabled="${!remaining.length}" ${!remaining.length ? "disabled" : ""}>全部加入</button><button class="text-button" type="button" data-action="clear-stops" data-idle-disabled="${!draft.stopIds.length}" ${!draft.stopIds.length ? "disabled" : ""}>清空</button></div></div>
+      ${draft.stopIds.length ? `<ol class="journey-order" aria-label="本趟站点顺序">${draft.stopIds.map((id, index) => `<li data-stop-id="${escapeHtml(id)}"><span class="journey-order-number">${index + 1}</span><span class="journey-order-name">${escapeHtml(names.get(id)) || "未填写站名"}</span><div class="journey-order-actions"><button class="button button-secondary button-small" type="button" data-action="move-stop" data-id="${escapeHtml(id)}" data-direction="-1" data-idle-disabled="${index === 0}" ${index === 0 ? "disabled" : ""} aria-label="上移第 ${index + 1} 站：${escapeHtml(names.get(id))}">↑</button><button class="button button-secondary button-small" type="button" data-action="move-stop" data-id="${escapeHtml(id)}" data-direction="1" data-idle-disabled="${index === draft.stopIds.length - 1}" ${index === draft.stopIds.length - 1 ? "disabled" : ""} aria-label="下移第 ${index + 1} 站：${escapeHtml(names.get(id))}">↓</button><button class="text-button text-danger" type="button" data-action="remove-stop" data-id="${escapeHtml(id)}" aria-label="移出本趟：${escapeHtml(names.get(id))}">移出</button></div></li>`).join("")}</ol>` : `<p class="journey-empty">${draft.stations.length ? "还没选择站点。从下方加入，或点“全部加入”。" : "先在“站点清单”中添加接送地点，再选择本趟站点。"}</p>`}
+      ${remaining.length ? `<h3 class="journey-section-title">可加入站点</h3><ul class="journey-available">${remaining.map((station) => `<li><span>${escapeHtml(station.name) || "未填写站名"}</span><button class="button button-secondary button-small" type="button" data-action="add-stop" data-id="${escapeHtml(station.id)}" aria-label="加入本趟：${escapeHtml(station.name)}">加入</button></li>`).join("")}</ul>` : ""}` : `<p class="journey-help">维护常用接送地点，再到“本趟线路”选择本次要经过的站点。站名最长 ${MAX_STATION_NAME_LENGTH} 个字符。</p>
+      <label for="station-names">新增站点（每行一个，可粘贴多行）</label><textarea id="station-names" rows="3" placeholder="学校南门&#10;幸福里东门&#10;文化路口">${escapeHtml(state.stationNamesInput)}</textarea><div class="station-add-actions"><button class="button button-secondary" type="button" data-action="add-stations">添加到清单</button></div>
+      ${draft.stations.length ? `<ul class="station-editor-list">${draft.stations.map((station, index) => `<li><label><span>站点 ${index + 1}</span><input type="text" data-station-name="${escapeHtml(station.id)}" aria-label="站点 ${index + 1} 名称" maxlength="${MAX_STATION_NAME_LENGTH}" value="${escapeHtml(station.name)}" required /></label><button class="text-button text-danger" type="button" data-action="delete-station" data-id="${escapeHtml(station.id)}" aria-label="删除站点 ${index + 1}">删除</button></li>`).join("")}</ul>` : '<p class="journey-empty">清单为空，添加后可在每趟重复使用。</p>'}`}
+    <p class="journey-editor-notice" ${resetsProgress ? "" : "hidden"}>保存后本趟将重置为“未出发”，所有站点变为待到站。</p><p id="journey-error" class="auth-error" role="alert"></p>
+    <div class="dialog-actions"><button class="text-button journey-reset" type="button" data-action="reset-journey-draft" data-idle-disabled="${state.journeyResetDraft || (state.journey.currentStopId === null && !state.journey.completed)}" ${state.journeyResetDraft || (state.journey.currentStopId === null && !state.journey.completed) ? "disabled" : ""}>重置进度</button><button class="button button-secondary" type="button" data-action="close-journey">取消</button><button class="button button-primary" type="submit">保存设置</button></div>
+  </form>`;
+}
+
+function openJourneyDialog() {
+  if (state.saving) return;
+  state.journeyDraft = structuredClone(state.journey);
+  state.journeyDialogTab = state.journey.stations.length ? "route" : "stations";
+  state.journeyResetDraft = false;
+  state.stationNamesInput = "";
+  renderJourneyDialog();
+  const dialog = document.querySelector("#journey-dialog");
+  dialog.showModal();
+  dialog.querySelector("#journey-dialog-title").focus({ preventScroll: true });
+}
+
+function journeyEditorError(message) {
+  const output = document.querySelector("#journey-error");
+  if (!output) return;
+  output.textContent = message;
+  output.scrollIntoView({ block: "nearest" });
+}
+
+function addStationsToDraft() {
+  const names = state.stationNamesInput.split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
+  if (!names.length) return journeyEditorError("请先填写站点名称，每行一个。");
+  const existing = new Set(state.journeyDraft.stations.map((station) => station.name.trim()));
+  for (const name of names) {
+    if (name.length > MAX_STATION_NAME_LENGTH) return journeyEditorError(`站名不能超过 ${MAX_STATION_NAME_LENGTH} 个字符：${name}`);
+    if (existing.has(name)) return journeyEditorError(`站名重复：${name}。请使用能区分地点的名称。`);
+    existing.add(name);
+  }
+  state.journeyDraft.stations.push(...names.map((name) => ({ id: crypto.randomUUID(), name })));
+  state.stationNamesInput = "";
+  renderJourneyDialog();
+  document.querySelector('[data-action="journey-editor-tab"][data-tab="route"]').focus({ preventScroll: true });
+}
+
+function editJourneyDraft(action, button) {
+  const draft = state.journeyDraft;
+  if (!draft || state.saving) return;
+  const id = button.dataset.id;
+  const index = draft.stopIds.indexOf(id);
+  if (action === "journey-editor-tab") {
+    state.journeyDialogTab = button.dataset.tab;
+  } else if (action === "add-stations") {
+    addStationsToDraft();
+    return;
+  } else if (action === "add-stop") {
+    if (index < 0 && draft.stations.some((station) => station.id === id)) draft.stopIds.push(id);
+  } else if (action === "add-all-stops") {
+    draft.stopIds.push(...draft.stations.map((station) => station.id).filter((id) => !draft.stopIds.includes(id)));
+  } else if (action === "remove-stop") {
+    draft.stopIds = draft.stopIds.filter((stopId) => stopId !== id);
+  } else if (action === "clear-stops") {
+    draft.stopIds = [];
+  } else if (action === "move-stop") {
+    const nextIndex = index + Number(button.dataset.direction);
+    if (index < 0 || nextIndex < 0 || nextIndex >= draft.stopIds.length) return;
+    [draft.stopIds[index], draft.stopIds[nextIndex]] = [draft.stopIds[nextIndex], draft.stopIds[index]];
+  } else if (action === "delete-station") {
+    const station = draft.stations.find((station) => station.id === id);
+    if (!station || !window.confirm(`从站点清单删除“${station.name}”？${index >= 0 ? "也会从本趟线路移除。" : ""}保存设置后生效。`)) return;
+    draft.stations = draft.stations.filter((station) => station.id !== id);
+    draft.stopIds = draft.stopIds.filter((stopId) => stopId !== id);
+  } else if (action === "reset-journey-draft") {
+    state.journeyResetDraft = true;
+  }
+  const dialog = document.querySelector("#journey-dialog");
+  const scrollTop = dialog.scrollTop;
+  renderJourneyDialog();
+  dialog.scrollTop = scrollTop;
+  const focusTarget = [...dialog.querySelectorAll("button[data-action]")].find((target) => target.dataset.action === action && target.dataset.id === id && target.dataset.direction === button.dataset.direction && target.dataset.tab === button.dataset.tab && !target.disabled);
+  focusTarget?.focus({ preventScroll: true });
+}
+
+async function submitJourneyForm() {
+  if (state.saving || !state.journeyDraft) return;
+  if (state.stationNamesInput.trim()) {
+    state.journeyDialogTab = "stations";
+    renderJourneyDialog();
+    return journeyEditorError("新增站点还未加入清单，请先点“添加到清单”，或清空输入后保存。");
+  }
+  const draft = state.journeyDraft;
+  const names = new Set();
+  for (let index = 0; index < draft.stations.length; index += 1) {
+    const name = draft.stations[index].name.trim();
+    if (!name || name.length > MAX_STATION_NAME_LENGTH || names.has(name)) {
+      state.journeyDialogTab = "stations";
+      renderJourneyDialog();
+      journeyEditorError(!name ? `请填写站点 ${index + 1} 的名称，不能只输入空格。` : names.has(name) ? `站名重复：${name}。请使用不同名称。` : `站点 ${index + 1} 的名称过长。`);
+      const input = document.querySelectorAll("[data-station-name]")[index];
+      input?.focus();
+      return;
+    }
+    names.add(name);
+  }
+  const changed = !sameStopOrder(state.journey.stopIds, draft.stopIds) || state.journeyResetDraft;
+  if (changed && (state.journey.currentStopId !== null || state.journey.completed)
+    && !window.confirm("保存后会重置本趟运行进度，所有站点变为待到站。学生签到状态保持原样。继续保存？")) return;
+  const previous = structuredClone(state.journey);
+  state.journey = configureJourney(previous, draft.stations, draft.stopIds, state.journeyResetDraft);
+  if (await saveWithSnapshot(state.records, previous)) {
+    document.querySelector("#journey-dialog").close();
+    revealCurrentStop();
+    document.querySelector('[data-action="manage-journey"]').focus({ preventScroll: true });
+  }
+}
+
+async function arriveAtStop(id) {
+  if (state.saving) return;
+  const journey = state.journey;
+  const index = journey.stopIds.indexOf(id);
+  if (index < 0 || id === journey.currentStopId) return;
+  const { currentIndex } = journeyProgress(journey);
+  if ((journey.completed || index < currentIndex)
+    && !window.confirm(`将当前站调整为第 ${index + 1} 站“${journey.stations.find((station) => station.id === id).name}”？前面的站点标为已过站，后面的站点恢复为待到站。`)) return;
+  const previous = structuredClone(journey);
+  state.journey = { ...journey, currentStopId: id, completed: false };
+  await saveWithSnapshot(state.records, previous);
+  revealCurrentStop();
+}
+
+async function nextJourneyStop() {
+  if (state.saving || !state.journey.stopIds.length) return;
+  const journey = state.journey;
+  const { nextStopId } = journeyProgress(journey);
+  if (nextStopId) return arriveAtStop(nextStopId);
+  if (journey.completed && !window.confirm("沿用本趟站点和顺序重新开始？所有站点将恢复为待到站，学生签到状态保持原样。")) return;
+  const previous = structuredClone(journey);
+  state.journey = { ...journey, currentStopId: null, completed: !journey.completed };
+  await saveWithSnapshot(state.records, previous);
+  revealCurrentStop();
+}
+
 function renderWorkspace() {
   const rosterActions = '<button class="button button-primary" type="button" data-action="import">导入 Excel</button><button class="button button-secondary" type="button" data-action="new-record">添加学生</button>';
   app.innerHTML = `<div class="app-shell">
@@ -322,14 +525,17 @@ function renderWorkspace() {
       <div class="page-heading"><div><h1>${state.activeTab === "roster" ? "学生名册" : "统计概览"}</h1><p>${state.records.length} 名学生</p></div>${state.activeTab === "roster" ? `<div class="page-actions desktop-only">${rosterActions}</div><details class="mobile-management"><summary class="button button-secondary button-small">管理</summary><div class="management-menu">${rosterActions}<button class="button button-secondary reset-status-button" type="button" data-action="reset-status">重置全部签到</button></div></details>` : ""}</div>
       ${renderMetrics()}
       <nav class="view-tabs" aria-label="名册视图"><button type="button" data-action="tab" data-tab="roster" class="${state.activeTab === "roster" ? "active" : ""}">名册</button><button type="button" data-action="tab" data-tab="statistics" class="${state.activeTab === "statistics" ? "active" : ""}">统计</button></nav>
+      ${renderJourneyPanel()}
       ${state.activeTab === "roster" ? renderRoster() : renderStatistics()}
     </main>
   </div>
   <dialog id="record-dialog" class="dialog" aria-labelledby="record-dialog-title"></dialog>
+  <dialog id="journey-dialog" class="dialog journey-dialog" aria-labelledby="journey-dialog-title"></dialog>
   <dialog id="import-dialog" class="dialog import-dialog" aria-labelledby="import-dialog-title"><form method="dialog" class="dialog-form"><div class="dialog-heading"><div><span class="dialog-kicker">名册数据</span><h2 id="import-dialog-title">导入 Excel</h2></div><button class="close-button" value="cancel" aria-label="关闭" formnovalidate>×</button></div><label class="file-picker"><span>选择文件</span><input id="import-file" type="file" accept=".xlsx,.xls,.csv" /></label><fieldset class="import-mode"><legend>导入方式</legend><label class="import-mode-option"><input type="radio" name="importMode" value="merge" checked /><span><strong>更新并追加</strong><small>按学生姓名和班级匹配，更新已有记录并新增未匹配记录</small></span></label><label class="import-mode-option import-mode-danger"><input type="radio" name="importMode" value="replace" /><span><strong>清空全部后导入</strong><small>先删除当前名册，再导入文件中的记录</small></span></label></fieldset><div id="import-preview" class="import-preview" role="status"></div><div class="dialog-actions"><button class="button button-secondary" value="cancel">取消</button><button class="button button-primary" type="button" data-action="confirm-import" disabled>导入</button></div></form></dialog>`;
   bindWorkspaceEvents();
   bindRosterColumnResizeEvents();
   updateSavingControls();
+  revealCurrentStop();
   document.querySelectorAll("dialog").forEach((dialog) => {
     dialog.addEventListener("cancel", (event) => {
       if (state.saving) event.preventDefault();
@@ -338,6 +544,11 @@ function renderWorkspace() {
   document.querySelector("#import-dialog").addEventListener("close", () => {
     importReadId += 1;
     state.importReading = false;
+  });
+  document.querySelector("#journey-dialog").addEventListener("close", () => {
+    state.journeyDraft = null;
+    state.stationNamesInput = "";
+    state.journeyResetDraft = false;
   });
 }
 
@@ -360,10 +571,10 @@ function renderSaveIndicator() {
 }
 
 function updateSavingControls() {
-  const actions = ["new-record", "edit", "delete", "import", "logout", "tab", "dimension", "filter-class", "filter-address", "reset-columns"];
+  const actions = ["new-record", "edit", "delete", "import", "logout", "tab", "dimension", "filter-class", "filter-address", "reset-columns", "manage-journey", "arrive-stop", "next-stop"];
   const selectors = actions.map((action) => `[data-action="${action}"]`);
-  selectors.push(".status-select", "dialog input", "dialog select", "dialog button");
-  document.querySelectorAll(selectors.join(",")).forEach((control) => { control.disabled = state.saving; });
+  selectors.push(".status-select", "dialog input", "dialog select", "dialog textarea", "dialog button");
+  document.querySelectorAll(selectors.join(",")).forEach((control) => { control.disabled = state.saving || control.dataset.idleDisabled === "true"; });
   document.querySelectorAll('[data-action="reset-status"]').forEach((reset) => {
     reset.disabled = state.saving || !state.records.some((record) => record.status !== "pending");
   });
@@ -372,6 +583,7 @@ function updateSavingControls() {
 
 function refreshWorkspaceData() {
   document.querySelector(".save-indicator").outerHTML = renderSaveIndicator();
+  refreshJourneyPanel();
   document.querySelector(".metrics").outerHTML = renderMetrics();
   document.querySelector(".page-heading p").textContent = `${state.records.length} 名学生`;
   if (state.activeTab === "roster") {
@@ -519,6 +731,7 @@ function errorMessage(error) {
   if (error.message === "client_update_required") return "页面版本已过期，请保留当前输入并刷新页面后重试";
   if (error.message === "payload_too_large") return "名册数据超过保存上限，请减少记录或缩短过长内容后重试";
   if (error.message === "invalid_vault" || error.name === "OperationError") return "数据无法解密，密码或名册数据不匹配";
+  if (error.message === "invalid_journey") return "站点数据无法读取，请检查最新备份或联系维护人员";
   return "请求失败，请稍后重试";
 }
 
@@ -565,16 +778,19 @@ async function handleUnlock(event) {
     state.authMode = "login";
     const key = await deriveKey(password, vault.salt);
     let records = [];
+    let journey = emptyJourney();
     if (vault.iv && vault.ciphertext) {
       const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(vault.iv) }, key, base64ToBytes(vault.ciphertext));
       const payload = JSON.parse(decoder.decode(plaintext));
       if (!payload || payload.version !== 1 || !Array.isArray(payload.records)) throw new Error("invalid_vault");
       records = payload.records.map(normalizeRecord);
+      journey = normalizeJourney(payload.journey);
     }
     state.password = password;
     state.key = key;
     state.salt = vault.salt;
     state.records = records;
+    state.journey = journey;
     state.updatedAt = vault.updatedAt || "";
     state.authError = "";
     state.saving = !vault.iv || !vault.ciphertext;
@@ -589,6 +805,7 @@ async function handleUnlock(event) {
     state.key = null;
     state.salt = "";
     state.records = [];
+    state.journey = emptyJourney();
     state.saving = false;
     if (error.message === "already_initialized") state.authMode = "login";
     state.authError = errorMessage(error);
@@ -612,21 +829,25 @@ function normalizeRecord(record) {
 
 async function persistRecords() {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const payload = encoder.encode(JSON.stringify({ version: 1, records: state.records, updatedAt: new Date().toISOString() }));
+  const payload = encoder.encode(JSON.stringify({ version: 1, records: state.records, journey: state.journey, updatedAt: new Date().toISOString() }));
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, state.key, payload);
   const encodedCiphertext = bytesToBase64(ciphertext);
   if (encodedCiphertext.length > MAX_CIPHERTEXT_LENGTH) throw new Error("payload_too_large");
   const result = await requestJson("/api/vault", "PUT", {
     password: state.password,
     baseUpdatedAt: state.updatedAt || null,
+    supportsJourney: true,
     iv: bytesToBase64(iv),
     ciphertext: encodedCiphertext
   });
   state.updatedAt = result.updatedAt;
 }
 
-async function saveWithSnapshot(previousRecords) {
+async function saveWithSnapshot(previousRecords, previousJourney = state.journey) {
   if (state.saving) return false;
+  const focusedStopControl = document.activeElement?.closest("#journey-panel button");
+  const focusedAction = focusedStopControl?.dataset.action;
+  const focusedId = focusedStopControl?.dataset.id;
   state.saving = true;
   refreshWorkspaceData();
   try {
@@ -634,11 +855,16 @@ async function saveWithSnapshot(previousRecords) {
     return true;
   } catch (error) {
     state.records = previousRecords;
+    state.journey = previousJourney;
     window.alert(`保存失败：${errorMessage(error)}`);
     return false;
   } finally {
     state.saving = false;
     refreshWorkspaceData();
+    if (focusedAction && document.activeElement === document.body) {
+      const control = [...document.querySelectorAll("#journey-panel button")].find((button) => button.dataset.action === focusedAction && button.dataset.id === focusedId && !button.disabled);
+      control?.focus({ preventScroll: true });
+    }
   }
 }
 
@@ -651,7 +877,21 @@ function bindWorkspaceEvents() {
     const { action } = button.dataset;
     button.closest(".mobile-management")?.removeAttribute("open");
     if (state.saving && ["new-record", "edit", "delete", "reset-status", "import", "confirm-import", "logout", "tab", "dimension"].includes(action)) return;
-    if (action === "tab") {
+    if (action === "toggle-journey") {
+      state.journeyExpanded = !(state.journeyExpanded ?? !compactJourneyMedia.matches);
+      refreshJourneyPanel(true);
+      document.querySelector('[data-action="toggle-journey"]').focus({ preventScroll: true });
+    } else if (action === "manage-journey") {
+      openJourneyDialog();
+    } else if (action === "arrive-stop") {
+      await arriveAtStop(button.dataset.id);
+    } else if (action === "next-stop") {
+      await nextJourneyStop();
+    } else if (action === "close-journey") {
+      if (!state.saving) document.querySelector("#journey-dialog").close();
+    } else if (["journey-editor-tab", "add-stations", "add-stop", "add-all-stops", "remove-stop", "clear-stops", "move-stop", "delete-station", "reset-journey-draft"].includes(action)) {
+      editJourneyDraft(action, button);
+    } else if (action === "tab") {
       state.activeTab = button.dataset.tab;
       render();
     } else if (action === "dimension") {
@@ -741,13 +981,19 @@ function bindWorkspaceEvents() {
 
   app.oninput = (event) => {
     if (event.target.matches('#record-form input[required]')) event.target.setCustomValidity("");
+    if (event.target.matches("[data-station-name]") && state.journeyDraft && !state.saving) {
+      const station = state.journeyDraft.stations.find((station) => station.id === event.target.dataset.stationName);
+      if (station) station.name = event.target.value;
+    }
+    if (event.target.matches("#station-names") && !state.saving) state.stationNamesInput = event.target.value;
     if (!event.target.matches("[name=search]") || event.isComposing || composingSearch) return;
     scheduleSearch(event.target.value);
   };
   app.onsubmit = async (event) => {
-    if (!event.target.matches("#record-form")) return;
+    if (!event.target.matches("#record-form, #journey-form")) return;
     event.preventDefault();
-    await submitRecordForm(event.target);
+    if (event.target.matches("#journey-form")) await submitJourneyForm();
+    else await submitRecordForm(event.target);
   };
 }
 
@@ -1042,6 +1288,9 @@ async function lockApp() {
   state.key = null;
   state.salt = "";
   state.records = [];
+  state.journey = emptyJourney();
+  state.journeyDraft = null;
+  state.stationNamesInput = "";
   state.updatedAt = "";
   state.search = "";
   state.classFilter = "";
@@ -1071,6 +1320,10 @@ window.addEventListener("beforeunload", (event) => {
   if (!state.saving || !state.key) return;
   event.preventDefault();
   event.returnValue = "";
+});
+
+compactJourneyMedia.addEventListener("change", () => {
+  if (state.key && state.journeyExpanded === null) refreshJourneyPanel(true);
 });
 
 render();

@@ -189,8 +189,9 @@ async function handleApi(request, env) {
     try {
       const auth = await authorize(request, env);
       if (auth.response) return auth.response;
-      const { iv, ciphertext, baseUpdatedAt } = auth.body;
-      if (baseUpdatedAt === undefined) return json({ error: "client_update_required" }, 428);
+      const { iv, ciphertext, baseUpdatedAt, supportsJourney } = auth.body;
+      // 旧页面保存时会丢弃新加的站点字段，必须刷新后才能写入。
+      if (baseUpdatedAt === undefined || supportsJourney !== true) return json({ error: "client_update_required" }, 428);
       if (baseUpdatedAt !== null && (typeof baseUpdatedAt !== "string" || !Number.isFinite(Date.parse(baseUpdatedAt)))) {
         return json({ error: "invalid_payload" }, 400);
       }
